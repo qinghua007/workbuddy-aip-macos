@@ -1,0 +1,105 @@
+name: Build SuSu Switcher macOS v1.4
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            app_name: CodexSwitcher-AppleSilicon
+            artifact_name: SuSu-Switcher-AppleSilicon-v1.4
+            release_dir: release-apple-silicon
+            zip_name: 苏苏全能中转站一键切换-M芯片版本v1.4-截图任务更新版.zip
+          - runner: macos-15-intel
+            arch: x86_64
+            app_name: CodexSwitcher-Intel
+            artifact_name: SuSu-Switcher-Intel-v1.4
+            release_dir: release-intel
+            zip_name: 苏苏全能中转站一键切换-Intel芯片版本v1.4-截图任务更新版.zip
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      APP_NAME: ${{ matrix.app_name }}
+      EXPECT_ARCH: ${{ matrix.arch }}
+      RELEASE_DIR: ${{ matrix.release_dir }}
+      RELEASE_ZIP: ${{ matrix.zip_name }}
+      BUNDLE_ID: com.susu.codex-switcher
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip pyinstaller pillow
+      - name: Generate icon
+        run: |
+          python generate_icon.py
+          iconutil -c icns icon.iconset -o susu_icon.icns
+      - name: Build native app
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "$EXPECT_ARCH"
+          python -m PyInstaller \
+            --noconfirm --clean --onefile --windowed \
+            --name "$APP_NAME" \
+            --osx-bundle-identifier "$BUNDLE_ID" \
+            --icon susu_icon.icns \
+            --distpath dist-native \
+            --workpath build-native \
+            codex_switcher_macos.py
+      - name: Prepare and verify release
+        run: |
+          set -euo pipefail
+          APP="dist-native/$APP_NAME.app"
+          BIN="$APP/Contents/MacOS/$APP_NAME"
+          PLIST="$APP/Contents/Info.plist"
+          test -f "$BIN"
+          chmod 755 "$BIN"
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleIdentifier" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleShortVersionString" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleVersion" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $BUNDLE_ID" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.4" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.4.0" "$PLIST"
+          plutil -lint "$PLIST"
+          codesign --force --deep --sign - "$APP"
+          test "$(lipo -archs "$BIN")" = "$EXPECT_ARCH"
+          SUSU_EXPECT_ARCH="$EXPECT_ARCH" "$BIN" --self-test-package
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          mkdir -p "$RELEASE_DIR"
+          ditto "$APP" "$RELEASE_DIR/$APP_NAME.app"
+          cp "Intel芯片版-首次启动修复.command" "$RELEASE_DIR/首次启动修复.command"
+          chmod 755 "$RELEASE_DIR/首次启动修复.command"
+          cat > "$RELEASE_DIR/使用说明.txt" <<EOF
+          苏苏全能中转站一键切换 macOS v1.4
+          架构：$EXPECT_ARCH
+          更新：读取模型、使用该中转站、切换 GPT 账号登录。
+          首次打开如被 Gatekeeper 拦截，请右键“首次启动修复.command”选择打开。
+          EOF
+          ditto -c -k --sequesterRsrc --keepParent "$RELEASE_DIR" "$RELEASE_ZIP"
+          rm -rf archive-check
+          mkdir archive-check
+          ditto -x -k "$RELEASE_ZIP" archive-check
+          CHECK_BIN="archive-check/$RELEASE_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+          test -x "$CHECK_BIN"
+          test "$(lipo -archs "$CHECK_BIN")" = "$EXPECT_ARCH"
+          SUSU_EXPECT_ARCH="$EXPECT_ARCH" "$CHECK_BIN" --self-test-package
+          codesign --verify --deep --strict --verbose=2 "archive-check/$RELEASE_DIR/$APP_NAME.app"
+          shasum -a 256 "$RELEASE_ZIP"
+      - name: Upload ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.zip_name }}
+          if-no-files-found: error
+          retention-days: 30
