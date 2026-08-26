@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Codex Provider Switcher v1.4 — macOS Edition
+Codex Provider Switcher V1.21 — macOS Edition
 Codex 供应商切换器 macOS 版本
-支持读取模型、使用中转站和切换 GPT 账号登录。
+支持读取模型、使用中转站后直达 Codex，以及切换 GPT 账号登录。
 """
 
 import copy
@@ -24,7 +24,7 @@ import urllib.request
 from tkinter import messagebox, ttk
 
 APP_NAME = "苏苏全能中转站一键切换"
-APP_VERSION = "1.4-macOS"
+APP_VERSION = "1.21-macOS"
 
 # ---------------- Codex 双配置目录 ----------------
 def resolve_codex_dir():
@@ -580,6 +580,54 @@ def _switch_provider_locked(provider):
     return True, msgs
 
 
+def switch_provider_and_launch(provider, cli=None, cwd=None):
+    """一键同步中转站、建立第三方登录态并打开 Codex；正常流程绝不 logout。"""
+    if not SWITCH_LOCK.acquire(blocking=False):
+        return False, ["已有切换或账号操作正在进行，请稍候"]
+    try:
+        provider = copy.deepcopy(provider)
+        ok, msgs = _switch_provider_locked(provider)
+        if not ok:
+            return False, msgs
+
+        cli = cli or find_codex_cli()
+        cwd = cwd or os.getcwd()
+        launch_env = os.environ.copy()
+        launch_env["CODEX_HOME"] = DESKTOP_CODEX_DIR
+        key = current_api_key(provider)
+        if key and provider["key"] != "openai":
+            env_name = "%s_API_KEY" % provider["key"].upper()
+            launch_env[env_name] = key
+            launch_env["OPENAI_API_KEY"] = key
+
+        first_error = ""
+        try:
+            launch = subprocess.run(
+                [cli, "app", cwd], capture_output=True, text=True, timeout=20, env=launch_env,
+            )
+            if launch.returncode == 0:
+                return True, msgs + ["已通过 codex app 打开 Codex，第三方中转站已生效"]
+            first_error = (launch.stderr or launch.stdout or "返回码 %d" % launch.returncode).strip()
+        except Exception as exc:
+            first_error = str(exc)
+
+        try:
+            fallback = subprocess.run(
+                ["open", "-a", "Codex"], capture_output=True, text=True, timeout=20, env=launch_env,
+            )
+            if fallback.returncode != 0:
+                detail = (fallback.stderr or fallback.stdout or "返回码 %d" % fallback.returncode).strip()
+                raise RuntimeError(detail)
+        except Exception as exc:
+            return False, msgs + [
+                "中转站配置与第三方登录已完成，但 Codex 启动失败：codex app（%s）；系统入口（%s）"
+                % (first_error, exc)
+            ]
+        return True, msgs + ["codex app 未成功，已通过系统应用入口打开 Codex，第三方中转站已生效"]
+    finally:
+        SWITCH_LOCK.release()
+
+
 def switch_gpt_account_flow(cli=None, cwd=None):
     """专用账号切换事务：双 config 切官方、logout、启动；失败完整回滚。"""
     if not SWITCH_LOCK.acquire(blocking=False):
@@ -891,13 +939,13 @@ class App:
             messagebox.showwarning("提示", "名称、API 地址、模型均为必填")
             return
         operation_key = p["key"]
-        self.log("正在后台同步供应商配置...")
+        self.log("正在同步中转站、建立第三方登录并打开 Codex...")
         threading.Thread(
             target=self._switch_worker, args=(copy.deepcopy(p), operation_key), daemon=True
         ).start()
 
     def _switch_worker(self, provider, operation_key):
-        ok, msgs = switch_provider(provider)
+        ok, msgs = switch_provider_and_launch(provider)
         self.root.after(0, lambda: self._switch_finished(ok, msgs, operation_key))
 
     def _switch_finished(self, ok, msgs, operation_key):
@@ -908,8 +956,8 @@ class App:
             for provider in self.providers:
                 provider["active"] = provider["key"] == operation_key
                 provider["api_key"] = ""
-            self.log("✔ 切换完成！请完全退出并重新打开 Codex 桌面端")
-            self.log("⚠️ 新终端需 source ~/.zshrc 或重开终端才能生效环境变量")
+            self.log("✔ 中转站切换完成并已打开 Codex，第三方登录态已生效")
+            self.log("新终端需 source ~/.zshrc 或重开终端才能继承环境变量")
             self.refresh_list()
             self.refresh_status()
         else:
@@ -1114,8 +1162,8 @@ def main():
         expected_arch = os.environ.get("SUSU_EXPECT_ARCH", "")
         if expected_arch and platform.machine() != expected_arch:
             raise RuntimeError("构建架构不匹配：期望 %s，实际 %s" % (expected_arch, platform.machine()))
-        if APP_VERSION != "1.4-macOS":
-            raise RuntimeError("应用版本不是 v1.4 macOS")
+        if APP_VERSION != "1.21-macOS":
+            raise RuntimeError("应用版本不是 V1.21 macOS")
         return
     if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
         out = sys.argv[2] if len(sys.argv) > 2 else "selftest.txt"

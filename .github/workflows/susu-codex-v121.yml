@@ -1,9 +1,9 @@
-name: Build SuSu Switcher macOS v1.4
+name: Build SuSu Switcher macOS V1.21
 
 on:
   workflow_dispatch:
   push:
-    branches: [main, master, susu-codex-v1.4-build]
+    branches: [main, master, susu-codex-v1.21-build]
 
 permissions:
   contents: read
@@ -17,15 +17,15 @@ jobs:
           - runner: macos-15
             arch: arm64
             app_name: CodexSwitcher-AppleSilicon
-            artifact_name: SuSu-Switcher-AppleSilicon-v1.4
+            artifact_name: SuSu-Switcher-AppleSilicon-V1.21
             release_dir: release-apple-silicon
-            zip_name: 苏苏全能中转站一键切换-M芯片版本v1.4-截图任务更新版.zip
+            zip_name: 苏苏Codex全能中转站一键切换-macOS-Apple-Silicon-arm64-V1.21.zip
           - runner: macos-15-intel
             arch: x86_64
             app_name: CodexSwitcher-Intel
-            artifact_name: SuSu-Switcher-Intel-v1.4
+            artifact_name: SuSu-Switcher-Intel-V1.21
             release_dir: release-intel
-            zip_name: 苏苏全能中转站一键切换-Intel芯片版本v1.4-截图任务更新版.zip
+            zip_name: 苏苏Codex全能中转站一键切换-macOS-Intel-x86_64-V1.21.zip
     runs-on: ${{ matrix.runner }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
@@ -69,8 +69,8 @@ jobs:
           /usr/libexec/PlistBuddy -c "Delete :CFBundleShortVersionString" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Delete :CFBundleVersion" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $BUNDLE_ID" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.4" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.4.0" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.21" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.21.0" "$PLIST"
           plutil -lint "$PLIST"
           codesign --force --deep --sign - "$APP"
           test "$(lipo -archs "$BIN")" = "$EXPECT_ARCH"
@@ -81,7 +81,7 @@ jobs:
           cp "Intel芯片版-首次启动修复.command" "$RELEASE_DIR/首次启动修复.command"
           chmod 755 "$RELEASE_DIR/首次启动修复.command"
           cat > "$RELEASE_DIR/使用说明.txt" <<EOF
-          苏苏全能中转站一键切换 macOS v1.4
+          苏苏Codex全能中转站一键切换 macOS V1.21
           架构：$EXPECT_ARCH
           更新：读取模型、使用该中转站、切换 GPT 账号登录。
           首次打开如被 Gatekeeper 拦截，请右键“首次启动修复.command”选择打开。
