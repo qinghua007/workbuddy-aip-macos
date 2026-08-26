@@ -474,7 +474,9 @@ def codex_gui_pids():
         if len(parts) != 2 or not parts[0].isdigit():
             continue
         command = parts[1]
-        if any(marker in command for marker in markers):
+        is_discovered_bundle = any(marker in command for marker in markers)
+        is_codex_bundle = bool(re.search(r"/[^/]*\bCodex\b[^/]*\.app/Contents/", command))
+        if is_discovered_bundle or is_codex_bundle:
             pids.add(int(parts[0]))
     return pids
 
@@ -543,6 +545,7 @@ def reopen_codex_app_best_effort(env):
 def launch_fresh_codex_app(cli, cwd, env, old_pids=None):
     """启动全新 Codex GUI，并以新 PID 为准验证；命令返回 0 不再等同于成功。"""
     errors = []
+    launch = None
     try:
         launch = subprocess.run(
             [cli, "app", cwd], capture_output=True, text=True, timeout=20, env=env,
@@ -560,10 +563,10 @@ def launch_fresh_codex_app(cli, cwd, env, old_pids=None):
             current = codex_gui_pids()
             if current:
                 raise RuntimeError("codex app 返回成功，但仅检测到旧或无法确认的新 Codex GUI 进程")
-            errors.append("codex app 返回成功，但 20 秒内未检测到 Codex GUI 进程")
+            raise RuntimeError("codex app 返回成功，但 20 秒内未检测到 Codex GUI 进程；为避免双实例未执行第二次启动")
     except Exception as exc:
         errors.append("codex app: %s" % exc)
-        if codex_gui_pids():
+        if (launch is not None and launch.returncode == 0) or codex_gui_pids():
             raise RuntimeError("；".join(errors))
 
     app_bundles = [path for path in _codex_app_bundles() if os.path.isdir(path)]
@@ -919,6 +922,8 @@ def switch_provider_and_launch(provider, cli=None, cwd=None):
 
         ok, msgs = _switch_provider_locked(provider)
         if not ok:
+            if old_pids:
+                reopen_codex_app_best_effort(os.environ.copy())
             return False, quit_messages + msgs
 
         launch_env = os.environ.copy()
@@ -939,7 +944,7 @@ def switch_provider_and_launch(provider, cli=None, cwd=None):
                     rollback_errors.append("macOS 钥匙串: %s" % rollback_exc)
             detail = "Codex 新 GUI 启动或验证失败，配置、认证、密钥与供应商状态已回滚：%s" % exc
             if old_pids:
-                reopen_codex_app_best_effort(launch_env)
+                reopen_codex_app_best_effort(os.environ.copy())
             if rollback_errors:
                 detail += "；部分回滚未完成：%s" % " | ".join(rollback_errors)
             return False, quit_messages + msgs + [detail]
@@ -952,7 +957,7 @@ def switch_provider_and_launch(provider, cli=None, cwd=None):
             except Exception as rollback_exc:
                 rollback_errors.append("macOS 钥匙串: %s" % rollback_exc)
         if old_pids:
-            reopen_codex_app_best_effort(launch_env)
+            reopen_codex_app_best_effort(os.environ.copy())
         detail = "切换失败，配置、认证、密钥与供应商状态已回滚：%s" % exc
         if rollback_errors:
             detail += "；部分回滚未完成：%s" % " | ".join(rollback_errors)
