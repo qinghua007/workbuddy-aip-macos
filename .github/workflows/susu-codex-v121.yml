@@ -40,7 +40,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: python -m pip install --upgrade pip pyinstaller pillow
+        run: python -m pip install --upgrade pip pyinstaller pillow certifi
       - name: Generate icon
         run: |
           python generate_icon.py
@@ -54,6 +54,7 @@ jobs:
             --name "$APP_NAME" \
             --osx-bundle-identifier "$BUNDLE_ID" \
             --icon susu_icon.icns \
+            --collect-data certifi \
             --distpath dist-native \
             --workpath build-native \
             codex_switcher_macos.py
@@ -75,6 +76,7 @@ jobs:
           codesign --force --deep --sign - "$APP"
           test "$(lipo -archs "$BIN")" = "$EXPECT_ARCH"
           SUSU_EXPECT_ARCH="$EXPECT_ARCH" "$BIN" --self-test-package
+          test -s "$(python -c 'import certifi; print(certifi.where())')"
           codesign --verify --deep --strict --verbose=2 "$APP"
           mkdir -p "$RELEASE_DIR"
           ditto "$APP" "$RELEASE_DIR/$APP_NAME.app"

@@ -14,6 +14,7 @@ import platform
 import re
 import shlex
 import shutil
+import ssl
 import subprocess
 import sys
 import threading
@@ -21,6 +22,8 @@ import time
 import tkinter as tk
 import urllib.error
 import urllib.request
+
+import certifi
 from tkinter import messagebox, ttk
 
 APP_NAME = "苏苏全能中转站一键切换"
@@ -372,29 +375,58 @@ def get_user_env_macos(name):
     return None
 
 
-def find_codex_cli():
-    """定位 codex CLI：CODEX_CLI_PATH 环境变量 -> 常见安装路径 -> PATH。"""
-    p = os.environ.get("CODEX_CLI_PATH") or ""
-    if p and os.path.isfile(p):
-        return p
-    # macOS Homebrew path
-    brew_paths = [
-        "/usr/local/bin/codex",   # Intel Homebrew
-        "/opt/homebrew/bin/codex", # Apple Silicon Homebrew
+def _codex_cli_candidates():
+    """返回 GUI 环境下可用的 Codex CLI 候选路径，兼容官方 App、Homebrew、npm/nvm/Volta。"""
+    home = os.path.expanduser("~")
+    candidates = [
+        os.environ.get("CODEX_CLI_PATH") or "",
+        "/Applications/Codex.app/Contents/Resources/bin/codex",
+        os.path.join(home, "Applications", "Codex.app", "Contents", "Resources", "bin", "codex"),
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex",
+        os.path.join(home, ".local", "bin", "codex"),
+        os.path.join(home, ".npm-global", "bin", "codex"),
+        os.path.join(home, ".volta", "bin", "codex"),
     ]
-    for p in brew_paths:
-        if os.path.isfile(p):
-            return p
-    # npm global
-    npm_prefix = os.path.expanduser("~/.npm-global/bin/codex")
-    if os.path.isfile(npm_prefix):
-        return npm_prefix
-    # PATH search
-    for d in os.environ.get("PATH", "").split(os.pathsep):
-        cand = os.path.join(d, "codex")
-        if os.path.isfile(cand):
-            return cand
-    return "codex"
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if directory:
+            candidates.append(os.path.join(directory, "codex"))
+    for pattern_root in (os.path.join(home, ".nvm", "versions", "node"),):
+        if os.path.isdir(pattern_root):
+            for version in sorted(os.listdir(pattern_root), reverse=True):
+                candidates.append(os.path.join(pattern_root, version, "bin", "codex"))
+    app_resources = [
+        "/Applications/Codex.app/Contents/Resources",
+        os.path.join(home, "Applications", "Codex.app", "Contents", "Resources"),
+    ]
+    for resource_root in app_resources:
+        if not os.path.isdir(resource_root):
+            continue
+        for current_root, directories, files in os.walk(resource_root):
+            directories[:] = [name for name in directories if name not in {"locales", "node_modules"}]
+            if "codex" in files:
+                candidates.append(os.path.join(current_root, "codex"))
+    try:
+        shell_lookup = subprocess.run(
+            ["/bin/zsh", "-lc", "command -v codex"], capture_output=True, text=True, timeout=8,
+        )
+        if shell_lookup.returncode == 0 and shell_lookup.stdout.strip():
+            candidates.append(shell_lookup.stdout.strip().splitlines()[0])
+    except Exception:
+        pass
+    return list(dict.fromkeys(path for path in candidates if path))
+
+
+def find_codex_cli():
+    """定位可执行 Codex CLI；找不到时明确报错，不再调用不可解析的裸命令。"""
+    for path in _codex_cli_candidates():
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    raise FileNotFoundError(
+        "未找到 Codex CLI。请先安装 Codex 官方 App 到 /Applications，"
+        "或在终端执行 brew install --cask codex / npm install -g @openai/codex，"
+        "也可设置 CODEX_CLI_PATH 指向 codex 可执行文件。"
+    )
 
 
 def current_api_key(provider):
@@ -722,11 +754,22 @@ def read_status():
     return key, name, model, valid, errors
 
 
+def create_ssl_context():
+    """使用随应用打包的 Mozilla CA，修复独立 macOS App 证书链缺失。"""
+    ca_bundle = certifi.where()
+    if not ca_bundle or not os.path.isfile(ca_bundle):
+        raise RuntimeError("可信 CA 证书包不可用，请重新安装本工具")
+    context = ssl.create_default_context(cafile=ca_bundle)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    return context
+
+
 def fetch_models(base_url, api_key, timeout=20):
     """调用 GET {base}/models 拉取模型 ID 列表。"""
     url = base_url.rstrip("/") + "/models"
     req = urllib.request.Request(url, headers={"Authorization": "Bearer %s" % api_key})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with urllib.request.urlopen(req, timeout=timeout, context=create_ssl_context()) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     ids = [m["id"] for m in data.get("data", []) if m.get("id")]
     return ids
@@ -972,8 +1015,19 @@ class App:
         if not p["name"] or not p["base_url"]:
             messagebox.showwarning("提示", "名称、API 地址必填")
             return
-        save_providers(self.providers)
-        self.log("已保存供应商「%s」配置" % p["name"])
+        try:
+            api_key = str(p.get("api_key") or "").strip()
+            if api_key:
+                env_name = "%s_API_KEY" % validate_provider_key(p["key"]).upper()
+                set_user_env_macos(env_name, api_key)
+                os.environ[env_name] = api_key
+            save_providers(self.providers)
+            p["api_key"] = ""
+            self.vars["api_key"].set("********" if current_api_key(p) else "")
+        except Exception as exc:
+            messagebox.showerror("保存失败", "供应商配置未保存：%s" % exc)
+            return
+        self.log("已保存供应商「%s」配置%s" % (p["name"], "及 API Key" if api_key else ""))
         self.refresh_list()
 
     def add_provider(self):
@@ -1164,6 +1218,9 @@ def main():
             raise RuntimeError("构建架构不匹配：期望 %s，实际 %s" % (expected_arch, platform.machine()))
         if APP_VERSION != "1.21-macOS":
             raise RuntimeError("应用版本不是 V1.21 macOS")
+        ssl_context = create_ssl_context()
+        if ssl_context.verify_mode != ssl.CERT_REQUIRED or not ssl_context.check_hostname:
+            raise RuntimeError("包内 TLS 证书验证未启用")
         return
     if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
         out = sys.argv[2] if len(sys.argv) > 2 else "selftest.txt"
