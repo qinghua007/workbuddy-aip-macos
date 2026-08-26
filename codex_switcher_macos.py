@@ -1093,6 +1093,7 @@ class App:
         root.title("%s v%s" % (APP_NAME, APP_VERSION))
         root.geometry("860x620")
         root.minsize(780, 560)
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         style = ttk.Style()
         try:
@@ -1254,6 +1255,12 @@ class App:
         return p
 
     # ---------- 操作 ----------
+    def on_close(self):
+        if self.operation_active:
+            messagebox.showwarning("操作进行中", "正在切换配置或认证，请等待完成后再关闭，避免事务被中断。")
+            return
+        self.root.destroy()
+
     def begin_operation(self):
         if self.operation_active:
             messagebox.showwarning("请稍候", "已有操作正在进行")
