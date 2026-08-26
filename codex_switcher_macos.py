@@ -464,16 +464,18 @@ def codex_gui_pids():
             ["/bin/ps", "-axo", "pid=,command="],
             capture_output=True, text=True, timeout=8,
         )
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                parts = line.strip().split(None, 1)
-                if len(parts) != 2 or not parts[0].isdigit():
-                    continue
-                command = parts[1]
-                if any(marker in command for marker in markers):
-                    pids.add(int(parts[0]))
-    except Exception:
-        pass
+    except Exception as exc:
+        raise RuntimeError("无法读取 Codex GUI 进程：%s" % exc)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "返回码 %d" % result.returncode).strip()
+        raise RuntimeError("无法读取 Codex GUI 进程：%s" % detail)
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        command = parts[1]
+        if any(marker in command for marker in markers):
+            pids.add(int(parts[0]))
     return pids
 
 
@@ -528,6 +530,16 @@ def wait_for_fresh_codex_app(old_pids, timeout=20):
     return set()
 
 
+def reopen_codex_app_best_effort(env):
+    """失败回滚后尽力恢复用户原先正在使用的 Codex GUI，不覆盖原始错误。"""
+    try:
+        bundles = [path for path in _codex_app_bundles() if os.path.isdir(path)]
+        command = ["/usr/bin/open", bundles[0]] if bundles else ["/usr/bin/open", "-a", "Codex"]
+        subprocess.run(command, capture_output=True, text=True, timeout=20, env=env)
+    except Exception:
+        pass
+
+
 def launch_fresh_codex_app(cli, cwd, env, old_pids=None):
     """启动全新 Codex GUI，并以新 PID 为准验证；命令返回 0 不再等同于成功。"""
     errors = []
@@ -542,12 +554,17 @@ def launch_fresh_codex_app(cli, cwd, env, old_pids=None):
                 ).strip()
             )
         else:
-            fresh = wait_for_fresh_codex_app(old_pids, timeout=15)
+            fresh = wait_for_fresh_codex_app(old_pids, timeout=20)
             if fresh:
                 return ["已启动全新 Codex GUI 进程（PID：%s），认证状态已重新加载" % ", ".join(map(str, sorted(fresh)))]
-            errors.append("codex app 返回成功，但未检测到新的 Codex GUI 进程")
+            current = codex_gui_pids()
+            if current:
+                raise RuntimeError("codex app 返回成功，但仅检测到旧或无法确认的新 Codex GUI 进程")
+            errors.append("codex app 返回成功，但 20 秒内未检测到 Codex GUI 进程")
     except Exception as exc:
         errors.append("codex app: %s" % exc)
+        if codex_gui_pids():
+            raise RuntimeError("；".join(errors))
 
     app_bundles = [path for path in _codex_app_bundles() if os.path.isdir(path)]
     fallback_command = (
@@ -886,12 +903,16 @@ def switch_provider_and_launch(provider, cli=None, cwd=None):
     if not SWITCH_LOCK.acquire(blocking=False):
         return False, ["已有切换或账号操作正在进行，请稍候"]
     provider = copy.deepcopy(provider)
-    outer_snapshots = {path: snapshot_file(path) for path in transaction_paths()}
-    env_name = "%s_API_KEY" % provider.get("key", "").upper() if provider.get("key") != "openai" else ""
-    previous_key = get_user_env_macos(env_name) if env_name else None
+    outer_snapshots = {}
+    env_name = ""
+    previous_key = None
     old_pids = set()
     quit_messages = []
+    launch_env = os.environ.copy()
     try:
+        outer_snapshots = {path: snapshot_file(path) for path in transaction_paths()}
+        env_name = "%s_API_KEY" % provider.get("key", "").upper() if provider.get("key") != "openai" else ""
+        previous_key = get_user_env_macos(env_name) if env_name else None
         cli = cli or find_codex_cli()
         cwd = cwd or os.getcwd()
         old_pids, quit_messages = quit_running_codex_app()
@@ -917,6 +938,8 @@ def switch_provider_and_launch(provider, cli=None, cwd=None):
                 except Exception as rollback_exc:
                     rollback_errors.append("macOS 钥匙串: %s" % rollback_exc)
             detail = "Codex 新 GUI 启动或验证失败，配置、认证、密钥与供应商状态已回滚：%s" % exc
+            if old_pids:
+                reopen_codex_app_best_effort(launch_env)
             if rollback_errors:
                 detail += "；部分回滚未完成：%s" % " | ".join(rollback_errors)
             return False, quit_messages + msgs + [detail]
@@ -928,6 +951,8 @@ def switch_provider_and_launch(provider, cli=None, cwd=None):
                 restore_keychain_secret(env_name, previous_key)
             except Exception as rollback_exc:
                 rollback_errors.append("macOS 钥匙串: %s" % rollback_exc)
+        if old_pids:
+            reopen_codex_app_best_effort(launch_env)
         detail = "切换失败，配置、认证、密钥与供应商状态已回滚：%s" % exc
         if rollback_errors:
             detail += "；部分回滚未完成：%s" % " | ".join(rollback_errors)
@@ -954,6 +979,7 @@ def _switch_gpt_account_locked(cli, cwd):
     env = os.environ.copy()
     env["CODEX_HOME"] = DESKTOP_CODEX_DIR
     messages = []
+    old_pids = set()
     try:
         old_pids, quit_messages = quit_running_codex_app()
         messages.extend(quit_messages)
@@ -978,6 +1004,8 @@ def _switch_gpt_account_locked(cli, cwd):
         return True, messages
     except Exception as exc:
         rollback_errors = restore_snapshots(snapshots)
+        if old_pids:
+            reopen_codex_app_best_effort(env)
         if rollback_errors:
             return False, messages + ["切换账号失败，且部分回滚未完成：%s；%s" % (exc, " | ".join(rollback_errors))]
         return False, messages + ["切换账号失败，原 config/auth/providers 已恢复：%s" % exc]
