@@ -140,3 +140,28 @@ jobs:
           path: ${{ matrix.zip_name }}
           if-no-files-found: error
           retention-days: 30
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified ZIP files
+        uses: actions/download-artifact@v4
+        with:
+          pattern: SuSu-Switcher-*-V1.21
+          path: release-assets
+          merge-multiple: true
+      - name: Publish temporary GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test "$(find release-assets -maxdepth 1 -type f -name '*.zip' | wc -l | tr -d ' ')" = "2"
+          TAG="macos-v1.21-${GITHUB_RUN_ID}"
+          gh release create "$TAG" release-assets/*.zip \
+            --target "$GITHUB_SHA" \
+            --title "苏苏 Codex macOS V1.21 修复版" \
+            --notes "Apple Silicon arm64 与 Intel x86_64 原生修复包。已在对应 macOS runner 验证架构、包内自检、Keychain 后端、Info.plist 和代码签名。"
