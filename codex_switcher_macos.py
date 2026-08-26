@@ -590,6 +590,81 @@ def wait_for_fresh_codex_app(old_pids, timeout=20):
     return set()
 
 
+def wait_for_stable_fresh_codex_app(old_pids, timeout=30, stable_seconds=6):
+    """确认新 Codex GUI 持续存活，避免 renderer 启动后立即白屏崩溃。"""
+    deadline = time.monotonic() + timeout
+    stable_since = None
+    stable_pids = set()
+    old_pids = set(old_pids or ())
+    while time.monotonic() < deadline:
+        fresh = codex_gui_pids() - old_pids
+        if fresh:
+            if stable_since is None or not (stable_pids & fresh):
+                stable_since = time.monotonic()
+                stable_pids = set(fresh)
+            elif time.monotonic() - stable_since >= stable_seconds:
+                return fresh
+        else:
+            stable_since = None
+            stable_pids = set()
+        time.sleep(0.25)
+    return set()
+
+
+def official_login_environment():
+    """GPT 登录流程使用干净环境，绝不继承任何第三方或 OpenAI API Key。"""
+    env = os.environ.copy()
+    env["CODEX_HOME"] = DESKTOP_CODEX_DIR
+    for name in list(env):
+        if name == "OPENAI_API_KEY" or name.endswith("_API_KEY"):
+            env.pop(name, None)
+    return env
+
+
+def launch_official_login_app(old_pids=None):
+    """通过官方 App 系统入口打开登录页，不使用会强制进入项目工作区的 codex app。"""
+    old_pids = set(old_pids or ())
+    bundles = [path for path in _codex_app_bundles() if os.path.isdir(path)]
+    command = (
+        ["/usr/bin/open", "-n", bundles[0]]
+        if bundles else ["/usr/bin/open", "-na", "Codex"]
+    )
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env=official_login_environment(),
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "返回码 %d" % result.returncode).strip()
+        raise RuntimeError("打开 Codex 官方登录页失败：%s" % detail)
+    fresh = wait_for_stable_fresh_codex_app(old_pids, timeout=30, stable_seconds=6)
+    if not fresh:
+        residual = codex_gui_pids() - old_pids
+        for pid in residual:
+            try:
+                os.kill(pid, 15)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if residual:
+            wait_for_codex_app_exit(timeout=8)
+        raise RuntimeError("Codex 官方登录窗口未能稳定启动，残留新进程已清理")
+    try:
+        subprocess.run(
+            ["/usr/bin/osascript", "-e", 'tell application id "com.openai.codex" to activate'],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except Exception:
+        pass
+    return [
+        "已通过官方 App 系统入口启动稳定的新登录窗口（PID：%s）"
+        % ", ".join(map(str, sorted(fresh)))
+    ]
+
+
 def reopen_codex_app_best_effort(env):
     """失败回滚后尽力恢复用户原先正在使用的 Codex GUI，不覆盖原始错误。"""
     try:
@@ -1039,8 +1114,7 @@ def _switch_gpt_account_locked(cli, cwd):
     openai_provider = copy.deepcopy(next(
         (p for p in load_providers() if p.get("key") == "openai"), DEFAULT_PROVIDERS[2]
     ))
-    env = os.environ.copy()
-    env["CODEX_HOME"] = DESKTOP_CODEX_DIR
+    env = official_login_environment()
     messages = []
     old_pids = set()
     try:
@@ -1062,8 +1136,8 @@ def _switch_gpt_account_locked(cli, cwd):
             raise RuntimeError("退出当前账号失败：%s" % detail)
         messages.append("已退出当前 Codex 登录账号")
 
-        messages.extend(launch_fresh_codex_app(cli, cwd, env, old_pids))
-        messages.append("✔ 全新 Codex GUI 已打开，请选择新的 GPT 账号登录")
+        messages.extend(launch_official_login_app(old_pids))
+        messages.append("✔ Codex 官方登录窗口已稳定打开，请选择新的 GPT 账号登录")
         return True, messages
     except Exception as exc:
         rollback_errors = restore_snapshots(snapshots)
