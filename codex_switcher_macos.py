@@ -7,6 +7,7 @@ Codex 供应商切换器 macOS 版本
 """
 
 import copy
+import glob
 import json
 import os
 import pathlib
@@ -28,6 +29,7 @@ from tkinter import messagebox, ttk
 
 APP_NAME = "苏苏全能中转站一键切换"
 APP_VERSION = "1.21-macOS"
+KEYCHAIN_SERVICE = "com.susu.codex-switcher.api-key"
 
 # ---------------- Codex 双配置目录 ----------------
 def resolve_codex_dir():
@@ -55,6 +57,7 @@ RECOVERY_AUTH_BACKUP_META_PATH = os.path.join(SW_DIR, "pre-switch-auth-recovery.
 WIRE_RESPONSES = "responses"
 WIRE_CHAT = "chat_completions"
 SWITCH_LOCK = threading.Lock()
+INSTANCE_LOCK_HANDLE = None
 PROVIDER_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 # ---------------- macOS shell profile for env vars ----------------
@@ -313,12 +316,59 @@ def backup_config(path=CONFIG_PATH, label="cli"):
     return dst
 
 
-def set_user_env_macos(name, value):
-    """安全、原子地写 shell profile；值使用 POSIX shell 转义，文件权限为 0600。"""
+def validate_env_name(name):
+    if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", str(name or "")):
+        raise ValueError("环境变量名不安全")
+    return str(name)
+
+
+def _keychain_command(*args):
+    security = "/usr/bin/security"
+    if not os.path.isfile(security):
+        raise FileNotFoundError("macOS 钥匙串工具不可用")
+    return [security] + list(args)
+
+
+def set_keychain_secret(name, value):
+    """写入 macOS 登录钥匙串；API Key 不落入 providers.json 或 shell profile。"""
+    name = validate_env_name(name)
     if not value:
         return
-    if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name):
-        raise ValueError("环境变量名不安全")
+    result = subprocess.run(
+        _keychain_command(
+            "add-generic-password", "-U", "-a", name,
+            "-s", KEYCHAIN_SERVICE, "-w",
+        ),
+        input=value + "\n", capture_output=True, text=True, timeout=15,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "未知错误").strip().replace(value, "***")
+        raise RuntimeError("写入 macOS 钥匙串失败：%s" % detail)
+
+
+def get_keychain_secret(name):
+    name = validate_env_name(name)
+    try:
+        result = subprocess.run(
+            _keychain_command(
+                "find-generic-password", "-a", name,
+                "-s", KEYCHAIN_SERVICE, "-w",
+            ),
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.rstrip("\r\n")
+    return value or None
+
+
+def _set_shell_profile_secret(name, value):
+    """旧版兼容：安全、原子地写 shell profile，供终端直接使用。"""
+    name = validate_env_name(name)
+    if not value:
+        return
     profile = get_shell_profile()
     marker_begin = "# >>> Codex Provider Switcher: %s >>>" % name
     marker_end = "# <<< Codex Provider Switcher: %s <<<" % name
@@ -342,13 +392,10 @@ def set_user_env_macos(name, value):
         raise RuntimeError("shell profile 中的密钥配置标记不完整")
     new_lines.extend(["", marker_begin, "export %s=%s" % (name, shlex.quote(value)), marker_end])
     atomic_write_text(profile, "\n".join(new_lines) + "\n", mode=0o600)
-    os.environ[name] = value
 
 
-def get_user_env_macos(name):
-    """读取本进程或本工具在 shell profile 中保存的环境变量。"""
-    if os.environ.get(name):
-        return os.environ[name]
+def _get_shell_profile_secret(name):
+    name = validate_env_name(name)
     profile = get_shell_profile()
     if not os.path.exists(profile):
         return None
@@ -375,37 +422,78 @@ def get_user_env_macos(name):
     return None
 
 
+def set_user_env_macos(name, value):
+    """API Key 以钥匙串为主存储，同时保留旧版 shell profile 兼容。"""
+    name = validate_env_name(name)
+    if not value:
+        return
+    set_keychain_secret(name, value)
+    try:
+        _set_shell_profile_secret(name, value)
+    except OSError:
+        # shell profile 不是可靠主存储；只要钥匙串成功，GUI 与 Codex 启动仍可用。
+        pass
+    os.environ[name] = value
+
+
+def get_user_env_macos(name):
+    """读取本进程、macOS 钥匙串或旧版 shell profile，并自动迁移旧密钥。"""
+    name = validate_env_name(name)
+    if os.environ.get(name):
+        return os.environ[name]
+    keychain_value = get_keychain_secret(name)
+    if keychain_value:
+        os.environ[name] = keychain_value
+        return keychain_value
+    legacy_value = _get_shell_profile_secret(name)
+    if legacy_value:
+        try:
+            set_keychain_secret(name, legacy_value)
+        except Exception:
+            pass
+        os.environ[name] = legacy_value
+        return legacy_value
+    return None
+
+
 def _codex_cli_candidates():
-    """返回 GUI 环境下可用的 Codex CLI 候选路径，兼容官方 App、Homebrew、npm/nvm/Volta。"""
+    """返回 GUI 环境下可用的 Codex CLI 候选路径，兼容官方 App、编辑器和包管理器。"""
     home = os.path.expanduser("~")
-    candidates = [
-        os.environ.get("CODEX_CLI_PATH") or "",
-        "/Applications/Codex.app/Contents/Resources/bin/codex",
-        os.path.join(home, "Applications", "Codex.app", "Contents", "Resources", "bin", "codex"),
+    app_resource_roots = [
+        "/Applications/Codex.app/Contents/Resources",
+        os.path.join(home, "Applications", "Codex.app", "Contents", "Resources"),
+    ]
+    candidates = [os.environ.get("CODEX_CLI_PATH") or ""]
+    for resource_root in app_resource_roots:
+        # 新版官方 Codex.app 把 CLI 直接放在 Resources/codex；旧版可能在 bin/codex。
+        candidates.extend([
+            os.path.join(resource_root, "codex"),
+            os.path.join(resource_root, "bin", "codex"),
+            os.path.join(resource_root, "app.asar.unpacked", "codex"),
+        ])
+    candidates.extend([
         "/opt/homebrew/bin/codex",
         "/usr/local/bin/codex",
         os.path.join(home, ".local", "bin", "codex"),
         os.path.join(home, ".npm-global", "bin", "codex"),
         os.path.join(home, ".volta", "bin", "codex"),
-    ]
+    ])
     for directory in os.environ.get("PATH", "").split(os.pathsep):
         if directory:
             candidates.append(os.path.join(directory, "codex"))
-    for pattern_root in (os.path.join(home, ".nvm", "versions", "node"),):
-        if os.path.isdir(pattern_root):
-            for version in sorted(os.listdir(pattern_root), reverse=True):
-                candidates.append(os.path.join(pattern_root, version, "bin", "codex"))
-    app_resources = [
-        "/Applications/Codex.app/Contents/Resources",
-        os.path.join(home, "Applications", "Codex.app", "Contents", "Resources"),
-    ]
-    for resource_root in app_resources:
-        if not os.path.isdir(resource_root):
-            continue
-        for current_root, directories, files in os.walk(resource_root):
-            directories[:] = [name for name in directories if name not in {"locales", "node_modules"}]
-            if "codex" in files:
-                candidates.append(os.path.join(current_root, "codex"))
+    candidates.extend(sorted(
+        glob.glob(os.path.join(home, ".nvm", "versions", "node", "*", "bin", "codex")),
+        reverse=True,
+    ))
+    for extension_root in (
+        os.path.join(home, ".vscode", "extensions"),
+        os.path.join(home, ".vscode-insiders", "extensions"),
+        os.path.join(home, ".cursor", "extensions"),
+    ):
+        candidates.extend(sorted(
+            glob.glob(os.path.join(extension_root, "openai.chatgpt-*", "bin", "*", "codex")),
+            reverse=True,
+        ))
     try:
         shell_lookup = subprocess.run(
             ["/bin/zsh", "-lc", "command -v codex"], capture_output=True, text=True, timeout=8,
@@ -414,19 +502,48 @@ def _codex_cli_candidates():
             candidates.append(shell_lookup.stdout.strip().splitlines()[0])
     except Exception:
         pass
-    return list(dict.fromkeys(path for path in candidates if path))
+    return list(dict.fromkeys(os.path.realpath(path) for path in candidates if path))
 
 
 def find_codex_cli():
-    """定位可执行 Codex CLI；找不到时明确报错，不再调用不可解析的裸命令。"""
+    """定位可执行 Codex CLI；优先使用官方 Codex.app 内置的 Resources/codex。"""
     for path in _codex_cli_candidates():
         if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
     raise FileNotFoundError(
-        "未找到 Codex CLI。请先安装 Codex 官方 App 到 /Applications，"
-        "或在终端执行 brew install --cask codex / npm install -g @openai/codex，"
-        "也可设置 CODEX_CLI_PATH 指向 codex 可执行文件。"
+        "未找到 Codex CLI。请确认 Codex.app 已复制到“应用程序”文件夹并至少打开过一次。"
+        "新版官方 App 的 CLI 应位于 /Applications/Codex.app/Contents/Resources/codex；"
+        "也可设置 CODEX_CLI_PATH 指向实际 codex 可执行文件。"
     )
+
+
+def acquire_single_instance_lock():
+    """使用 POSIX flock 阻止重复实例，避免 Dock 出现同一工具的重复图标。"""
+    global INSTANCE_LOCK_HANDLE
+    if sys.platform != "darwin":
+        return True
+    import fcntl
+    lock_dir = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "SuSuCodexSwitcher")
+    os.makedirs(lock_dir, exist_ok=True)
+    handle = open(os.path.join(lock_dir, "instance.lock"), "a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return False
+    INSTANCE_LOCK_HANDLE = handle
+    return True
+
+
+def activate_existing_instance():
+    """重复启动时激活已运行实例，不创建第二个 GUI 进程。"""
+    if sys.platform != "darwin":
+        return
+    script = 'tell application id "com.susu.codex-switcher" to activate'
+    try:
+        subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True, timeout=5)
+    except Exception:
+        pass
 
 
 def current_api_key(provider):
@@ -1225,6 +1342,9 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
         out = sys.argv[2] if len(sys.argv) > 2 else "selftest.txt"
         selftest(out)
+        return
+    if not acquire_single_instance_lock():
+        activate_existing_instance()
         return
     root = tk.Tk()
     App(root)

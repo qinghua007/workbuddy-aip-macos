@@ -50,7 +50,7 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = "$EXPECT_ARCH"
           python -m PyInstaller \
-            --noconfirm --clean --onefile --windowed \
+            --noconfirm --clean --onedir --windowed \
             --name "$APP_NAME" \
             --osx-bundle-identifier "$BUNDLE_ID" \
             --icon susu_icon.icns \
@@ -69,14 +69,27 @@ jobs:
           /usr/libexec/PlistBuddy -c "Delete :CFBundleIdentifier" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Delete :CFBundleShortVersionString" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Delete :CFBundleVersion" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleDisplayName" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Delete :LSMultipleInstancesProhibited" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $BUNDLE_ID" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string 苏苏Codex全能中转站一键切换" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.21" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.21.0" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.21.1" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :LSMultipleInstancesProhibited bool true" "$PLIST"
           plutil -lint "$PLIST"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMultipleInstancesProhibited' "$PLIST")" = "true"
           codesign --force --deep --sign - "$APP"
           test "$(lipo -archs "$BIN")" = "$EXPECT_ARCH"
           SUSU_EXPECT_ARCH="$EXPECT_ARCH" "$BIN" --self-test-package
           test -s "$(python -c 'import certifi; print(certifi.where())')"
+          PLIST_PATH="$PLIST" python - <<'PY'
+          import os, plistlib
+          with open(os.environ["PLIST_PATH"], "rb") as handle:
+              info = plistlib.load(handle)
+          assert info["CFBundleIdentifier"] == "com.susu.codex-switcher"
+          assert info["LSMultipleInstancesProhibited"] is True
+          assert info["CFBundleVersion"] == "1.21.1"
+          PY
           codesign --verify --deep --strict --verbose=2 "$APP"
           mkdir -p "$RELEASE_DIR"
           ditto "$APP" "$RELEASE_DIR/$APP_NAME.app"
