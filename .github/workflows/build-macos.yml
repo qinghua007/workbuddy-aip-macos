@@ -21,7 +21,7 @@ jobs:
             release_dir: release-apple-silicon
             codex_npm_platform: darwin-arm64
             codex_triple: aarch64-apple-darwin
-            zip_name: 鑻忚嫃Codex鍏ㄨ兘涓浆绔欎竴閿垏鎹?macOS-Apple-Silicon-arm64-V1.24.zip
+            zip_name: SuSu-Codex-Switcher-macOS-Apple-Silicon-arm64-V1.24.zip
           - runner: macos-15-intel
             arch: x86_64
             app_name: CodexSwitcher-Intel
@@ -29,7 +29,7 @@ jobs:
             release_dir: release-intel
             codex_npm_platform: darwin-x64
             codex_triple: x86_64-apple-darwin
-            zip_name: 鑻忚嫃Codex鍏ㄨ兘涓浆绔欎竴閿垏鎹?macOS-Intel-x86_64-V1.24.zip
+            zip_name: SuSu-Codex-Switcher-macOS-Intel-x86_64-V1.24.zip
     runs-on: ${{ matrix.runner }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
@@ -43,15 +43,20 @@ jobs:
       BUNDLE_ID: com.susu.codex-switcher
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
       - name: Install dependencies
         run: python -m pip install --upgrade pip pyinstaller pillow certifi keyring
+
       - name: Generate icon
         run: |
+          set -euo pipefail
           python generate_icon_macos.py
           iconutil -c icns icon.iconset -o susu_icon.icns
+
       - name: Acquire official native Codex CLI
         run: |
           set -euo pipefail
@@ -63,6 +68,7 @@ jobs:
           chmod 755 bundled-codex-cli/codex
           test "$(lipo -archs bundled-codex-cli/codex)" = "$EXPECT_ARCH"
           bundled-codex-cli/codex --version
+
       - name: Build native app
         run: |
           set -euo pipefail
@@ -78,6 +84,7 @@ jobs:
             --distpath dist-native \
             --workpath build-native \
             codex_switcher_macos.py
+
       - name: Prepare and verify release
         run: |
           set -euo pipefail
@@ -85,49 +92,58 @@ jobs:
           BIN="$APP/Contents/MacOS/$APP_NAME"
           PLIST="$APP/Contents/Info.plist"
           BUNDLED_CLI="$APP/Contents/Frameworks/codex-cli/codex"
+
           test -f "$BIN"
           test -f "$BUNDLED_CLI"
           chmod 755 "$BIN" "$BUNDLED_CLI"
           test "$(lipo -archs "$BUNDLED_CLI")" = "$EXPECT_ARCH"
           "$BUNDLED_CLI" --version
+
           /usr/libexec/PlistBuddy -c "Delete :CFBundleIdentifier" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Delete :CFBundleShortVersionString" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Delete :CFBundleVersion" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Delete :CFBundleDisplayName" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Delete :LSMultipleInstancesProhibited" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $BUNDLE_ID" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string 鑻忚嫃Codex鍏ㄨ兘涓浆绔欎竴閿垏鎹? "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string SuSu Codex Switcher" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.24" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.24.0" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :LSMultipleInstancesProhibited bool true" "$PLIST"
           plutil -lint "$PLIST"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSMultipleInstancesProhibited' "$PLIST")" = "true"
+
           codesign --force --deep --sign - "$APP"
           test "$(lipo -archs "$BIN")" = "$EXPECT_ARCH"
           SUSU_EXPECT_ARCH="$EXPECT_ARCH" "$BIN" --self-test-package
-          test -s "$(python -c 'import certifi; print(certifi.where())')"
-          # --self-test-package 鍦ㄥ綋鍓嶅師鐢熻繘绋嬩腑寮哄埗鏍￠獙 macOS Keychain 鍚庣銆?          PLIST_PATH="$PLIST" python - <<'PY'
-          import os, plistlib
+
+          PLIST_PATH="$PLIST" python - <<'PY'
+          import os
+          import plistlib
+
           with open(os.environ["PLIST_PATH"], "rb") as handle:
               info = plistlib.load(handle)
+
           assert info["CFBundleIdentifier"] == "com.susu.codex-switcher"
-          assert info["LSMultipleInstancesProhibited"] is True
+          assert info["CFBundleShortVersionString"] == "1.24"
           assert info["CFBundleVersion"] == "1.24.0"
+          assert info["LSMultipleInstancesProhibited"] is True
           PY
+
           codesign --verify --deep --strict --verbose=2 "$APP"
           mkdir -p "$RELEASE_DIR"
           ditto "$APP" "$RELEASE_DIR/$APP_NAME.app"
-          cat > "$RELEASE_DIR/棣栨鍚姩淇.command" <<EOF
+
+          cat > "$RELEASE_DIR/First-Launch.command" <<EOF
           #!/bin/bash
           set -euo pipefail
           SCRIPT_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
           APP="\$SCRIPT_DIR/$APP_NAME.app"
           if [[ "\$(uname -m)" != "$EXPECT_ARCH" ]]; then
-            osascript -e 'display alert "鏋舵瀯涓嶅尮閰? message "姝ゅ畨瑁呭寘浠呴€傜敤浜?$EXPECT_ARCH Mac銆?' || true
+            osascript -e 'display alert "Architecture mismatch" message "This package only supports $EXPECT_ARCH Macs."' || true
             exit 1
           fi
           if [[ ! -d "\$APP" ]]; then
-            osascript -e 'display alert "鏈壘鍒板簲鐢? message "璇锋妸棣栨鍚姩淇.command 涓?$APP_NAME.app 鏀惧湪鍚屼竴鏂囦欢澶广€?' || true
+            osascript -e 'display alert "Application not found" message "Keep First-Launch.command beside $APP_NAME.app."' || true
             exit 1
           fi
           xattr -dr com.apple.quarantine "\$APP" 2>/dev/null || true
@@ -137,21 +153,36 @@ jobs:
           codesign --verify --deep --strict "\$APP"
           open "\$APP"
           EOF
-          chmod 755 "$RELEASE_DIR/棣栨鍚姩淇.command"
-          cat > "$RELEASE_DIR/浣跨敤璇存槑.txt" <<EOF
-          鑻忚嫃Codex鍏ㄨ兘涓浆绔欎竴閿垏鎹?macOS V1.24
-          鏋舵瀯锛?EXPECT_ARCH
-          淇锛氬吋瀹规棫绛惧悕閽ュ寵涓叉潯鐩殑 -25244 ACL 鍐茬獊锛涘垏鎹㈠墠閫€鍑烘棫 Codex GUI銆佸垏鎹㈠悗楠岃瘉鍏ㄦ柊 GUI 杩涚▼銆佸崟瀹炰緥鍗曞浘鏍囥€佸唴缃畼鏂瑰師鐢?Codex CLI銆?          棣栨鎵撳紑濡傝 Gatekeeper 鎷︽埅锛岃鍙抽敭鈥滈娆″惎鍔ㄤ慨澶?command鈥濋€夋嫨鎵撳紑銆?          璇峰厛灏?Codex 瀹樻柟 App 澶嶅埗鍒?/Applications锛屽苟鑷冲皯鎵撳紑涓€娆°€?          EOF
+          chmod 755 "$RELEASE_DIR/First-Launch.command"
+
+          cat > "$RELEASE_DIR/README.txt" <<EOF
+          SuSu Codex Provider Switcher macOS V1.24
+          Architecture: $EXPECT_ARCH
+
+          Fixes in V1.24:
+          - Launches the real Codex.app executable directly so the selected login environment is preserved.
+          - Applies Electron GPU fallback flags to avoid a blank Codex login renderer.
+          - Keeps the V1.23 Keychain -25244 ACL-safe update and rollback behavior.
+          - Verifies a fresh stable Codex GUI process and removes residual processes on failure.
+          - Includes the official native Codex CLI 0.149.1.
+
+          Before testing, quit every old SuSu Switcher and Codex process, then run only this V1.24 package.
+          Copy the official Codex.app to /Applications and open it at least once before switching.
+          If Gatekeeper blocks the app, right-click First-Launch.command and choose Open.
+          EOF
+
           ditto -c -k --sequesterRsrc --keepParent "$RELEASE_DIR" "$RELEASE_ZIP"
           rm -rf archive-check
           mkdir archive-check
           ditto -x -k "$RELEASE_ZIP" archive-check
-          CHECK_BIN="archive-check/$RELEASE_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+          CHECK_APP="archive-check/$RELEASE_DIR/$APP_NAME.app"
+          CHECK_BIN="$CHECK_APP/Contents/MacOS/$APP_NAME"
           test -x "$CHECK_BIN"
           test "$(lipo -archs "$CHECK_BIN")" = "$EXPECT_ARCH"
           SUSU_EXPECT_ARCH="$EXPECT_ARCH" "$CHECK_BIN" --self-test-package
-          codesign --verify --deep --strict --verbose=2 "archive-check/$RELEASE_DIR/$APP_NAME.app"
+          codesign --verify --deep --strict --verbose=2 "$CHECK_APP"
           shasum -a 256 "$RELEASE_ZIP"
+
       - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
@@ -172,6 +203,7 @@ jobs:
           pattern: SuSu-Switcher-*-V1.24
           path: release-assets
           merge-multiple: true
+
       - name: Publish temporary GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -182,5 +214,5 @@ jobs:
           TAG="macos-v1.24-${GITHUB_RUN_ID}"
           gh release create "$TAG" release-assets/*.zip \
             --target "$GITHUB_SHA" \
-            --title "鑻忚嫃 Codex macOS V1.24 GUI 璁よ瘉鍒锋柊淇鐗? \
-            --notes "Apple Silicon arm64 涓?Intel x86_64 鍘熺敓淇鍖呫€備慨澶嶆棫 ad-hoc 绛惧悕閽ュ寵涓叉潯鐩鑷寸殑 errSecInvalidOwnerEdit(-25244)锛屽悓鍊间笉閲嶅鍐欍€佸啿绐佸師鍦版洿鏂般€佸洖婊氬厛姣斿锛涚涓夋柟鍜?GPT 鐧诲綍鍧囩洿鎺ュ惎鍔ㄥ畼鏂?Codex.app 涓荤▼搴忥紝鏄惧紡浼犻€掑共鍑€鐜骞剁鐢ㄥ凡鐭?GPU 鍚堟垚鐧藉睆璺緞锛涘苟楠岃瘉 GUI 鏂?PID銆佹灦鏋勩€佸寘鍐呰嚜妫€銆並eychain 鍚庣銆両nfo.plist 鍜屼唬鐮佺鍚嶃€?
+            --title "SuSu Codex Switcher macOS V1.24" \
+            --notes "Native Apple Silicon arm64 and Intel x86_64 packages. V1.24 directly launches the official Codex.app executable with an explicit clean environment and Electron GPU fallback flags. It retains the V1.23 Keychain -25244 ACL-safe update and rollback behavior."
