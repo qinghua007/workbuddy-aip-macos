@@ -420,24 +420,57 @@ def get_user_env_macos(name):
     return None
 
 
-def _codex_cli_candidates():
-    """返回 GUI 环境下可用的 Codex CLI 候选路径，兼容官方 App、编辑器和包管理器。"""
+def bundled_codex_cli_path():
+    """返回随本应用打包的官方原生 Codex CLI 路径。"""
+    bundle_root = getattr(sys, "_MEIPASS", "")
+    if not bundle_root:
+        return ""
+    return os.path.join(bundle_root, "codex-cli", "codex")
+
+
+def _codex_app_bundles():
+    """动态发现系统、用户和 Spotlight 可见的 Codex.app，不依赖固定安装名称。"""
     home = os.path.expanduser("~")
-    app_resource_roots = [
-        "/Applications/Codex.app/Contents/Resources",
-        os.path.join(home, "Applications", "Codex.app", "Contents", "Resources"),
+    bundles = [
+        "/Applications/Codex.app",
+        os.path.join(home, "Applications", "Codex.app"),
     ]
-    candidates = [os.environ.get("CODEX_CLI_PATH") or ""]
-    for resource_root in app_resource_roots:
-        # 新版官方 Codex.app 把 CLI 直接放在 Resources/codex；旧版可能在 bin/codex。
+    for root in ("/Applications", os.path.join(home, "Applications")):
+        bundles.extend(sorted(glob.glob(os.path.join(root, "*Codex*.app"))))
+    if sys.platform == "darwin":
+        try:
+            lookup = subprocess.run(
+                ["/usr/bin/mdfind", "kMDItemCFBundleIdentifier == 'com.openai.codex'"],
+                capture_output=True, text=True, timeout=8,
+            )
+            if lookup.returncode == 0:
+                bundles.extend(line.strip() for line in lookup.stdout.splitlines() if line.strip().endswith(".app"))
+        except Exception:
+            pass
+    return list(dict.fromkeys(os.path.realpath(path) for path in bundles if path))
+
+
+def _codex_cli_candidates():
+    """返回 GUI 环境下可用的 Codex CLI 候选；包内官方 CLI 优先，系统安装作为后备。"""
+    home = os.path.expanduser("~")
+    candidates = [
+        bundled_codex_cli_path(),
+        os.environ.get("CODEX_CLI_PATH") or "",
+    ]
+    for app_bundle in _codex_app_bundles():
+        resource_root = os.path.join(app_bundle, "Contents", "Resources")
         candidates.extend([
             os.path.join(resource_root, "codex"),
             os.path.join(resource_root, "bin", "codex"),
             os.path.join(resource_root, "app.asar.unpacked", "codex"),
+            os.path.join(resource_root, "app.asar.unpacked", "bin", "codex"),
         ])
+        # 官方 App 内部目录会随版本变化；限定在 Resources 内动态寻找同名可执行文件。
+        candidates.extend(sorted(glob.glob(os.path.join(resource_root, "**", "codex"), recursive=True)))
     candidates.extend([
         "/opt/homebrew/bin/codex",
         "/usr/local/bin/codex",
+        "/usr/bin/codex",
         os.path.join(home, ".local", "bin", "codex"),
         os.path.join(home, ".npm-global", "bin", "codex"),
         os.path.join(home, ".volta", "bin", "codex"),
@@ -453,31 +486,37 @@ def _codex_cli_candidates():
         os.path.join(home, ".vscode", "extensions"),
         os.path.join(home, ".vscode-insiders", "extensions"),
         os.path.join(home, ".cursor", "extensions"),
+        os.path.join(home, ".windsurf", "extensions"),
     ):
         candidates.extend(sorted(
             glob.glob(os.path.join(extension_root, "openai.chatgpt-*", "bin", "*", "codex")),
             reverse=True,
         ))
-    try:
-        shell_lookup = subprocess.run(
-            ["/bin/zsh", "-lc", "command -v codex"], capture_output=True, text=True, timeout=8,
-        )
-        if shell_lookup.returncode == 0 and shell_lookup.stdout.strip():
-            candidates.append(shell_lookup.stdout.strip().splitlines()[0])
-    except Exception:
-        pass
+    for shell in ("/bin/zsh", "/bin/bash"):
+        if not os.path.isfile(shell):
+            continue
+        try:
+            shell_lookup = subprocess.run(
+                [shell, "-lic", "command -v codex"], capture_output=True, text=True, timeout=8,
+            )
+            if shell_lookup.returncode == 0 and shell_lookup.stdout.strip():
+                candidates.append(shell_lookup.stdout.strip().splitlines()[0])
+        except Exception:
+            pass
     return list(dict.fromkeys(os.path.realpath(path) for path in candidates if path))
 
 
 def find_codex_cli():
-    """定位可执行 Codex CLI；优先使用官方 Codex.app 内置的 Resources/codex。"""
+    """定位可执行 Codex CLI；发行包内置官方原生 CLI，因此不依赖用户额外安装。"""
+    checked = []
     for path in _codex_cli_candidates():
+        checked.append(path)
         if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
+    preview = "；".join(checked[:6]) if checked else "没有生成候选路径"
     raise FileNotFoundError(
-        "未找到 Codex CLI。请确认 Codex.app 已复制到“应用程序”文件夹并至少打开过一次。"
-        "新版官方 App 的 CLI 应位于 /Applications/Codex.app/Contents/Resources/codex；"
-        "也可设置 CODEX_CLI_PATH 指向实际 codex 可执行文件。"
+        "未找到可执行的 Codex CLI。当前修复包应自带官方 CLI；请重新下载并完整解压 ZIP，"
+        "不要只复制单个可执行文件。已检查：%s。也可设置 CODEX_CLI_PATH 指向实际 codex。" % preview
     )
 
 
@@ -1338,6 +1377,9 @@ def main():
             backend_name = "%s.%s" % (backend.__class__.__module__, backend.__class__.__name__)
             if backend_name != "keyring.backends.macOS.Keyring":
                 raise RuntimeError("macOS 钥匙串后端不可用：%s" % backend_name)
+            bundled_cli = bundled_codex_cli_path()
+            if not bundled_cli or not os.path.isfile(bundled_cli) or not os.access(bundled_cli, os.X_OK):
+                raise RuntimeError("包内官方 Codex CLI 缺失或不可执行：%s" % bundled_cli)
         ssl_context = create_ssl_context()
         if ssl_context.verify_mode != ssl.CERT_REQUIRED or not ssl_context.check_hostname:
             raise RuntimeError("包内 TLS 证书验证未启用")

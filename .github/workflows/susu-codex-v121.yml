@@ -19,12 +19,16 @@ jobs:
             app_name: CodexSwitcher-AppleSilicon
             artifact_name: SuSu-Switcher-AppleSilicon-V1.21
             release_dir: release-apple-silicon
+            codex_npm_platform: darwin-arm64
+            codex_triple: aarch64-apple-darwin
             zip_name: 苏苏Codex全能中转站一键切换-macOS-Apple-Silicon-arm64-V1.21.zip
           - runner: macos-15-intel
             arch: x86_64
             app_name: CodexSwitcher-Intel
             artifact_name: SuSu-Switcher-Intel-V1.21
             release_dir: release-intel
+            codex_npm_platform: darwin-x64
+            codex_triple: x86_64-apple-darwin
             zip_name: 苏苏Codex全能中转站一键切换-macOS-Intel-x86_64-V1.21.zip
     runs-on: ${{ matrix.runner }}
     env:
@@ -33,6 +37,9 @@ jobs:
       EXPECT_ARCH: ${{ matrix.arch }}
       RELEASE_DIR: ${{ matrix.release_dir }}
       RELEASE_ZIP: ${{ matrix.zip_name }}
+      CODEX_NPM_PLATFORM: ${{ matrix.codex_npm_platform }}
+      CODEX_TRIPLE: ${{ matrix.codex_triple }}
+      CODEX_VERSION: "0.149.1"
       BUNDLE_ID: com.susu.codex-switcher
     steps:
       - uses: actions/checkout@v4
@@ -45,6 +52,17 @@ jobs:
         run: |
           python generate_icon.py
           iconutil -c icns icon.iconset -o susu_icon.icns
+      - name: Acquire official native Codex CLI
+        run: |
+          set -euo pipefail
+          npm pack "@openai/codex@${CODEX_VERSION}-${CODEX_NPM_PLATFORM}" --pack-destination .
+          TARBALL="openai-codex-${CODEX_VERSION}-${CODEX_NPM_PLATFORM}.tgz"
+          mkdir -p bundled-codex-cli
+          tar -xzf "$TARBALL" -C bundled-codex-cli \
+            --strip-components=4 "package/vendor/${CODEX_TRIPLE}/bin/codex"
+          chmod 755 bundled-codex-cli/codex
+          test "$(lipo -archs bundled-codex-cli/codex)" = "$EXPECT_ARCH"
+          bundled-codex-cli/codex --version
       - name: Build native app
         run: |
           set -euo pipefail
@@ -56,6 +74,7 @@ jobs:
             --icon susu_icon.icns \
             --collect-data certifi \
             --collect-all keyring \
+            --add-binary "bundled-codex-cli/codex:codex-cli" \
             --distpath dist-native \
             --workpath build-native \
             codex_switcher_macos.py
@@ -65,8 +84,12 @@ jobs:
           APP="dist-native/$APP_NAME.app"
           BIN="$APP/Contents/MacOS/$APP_NAME"
           PLIST="$APP/Contents/Info.plist"
+          BUNDLED_CLI="$APP/Contents/Frameworks/codex-cli/codex"
           test -f "$BIN"
-          chmod 755 "$BIN"
+          test -f "$BUNDLED_CLI"
+          chmod 755 "$BIN" "$BUNDLED_CLI"
+          test "$(lipo -archs "$BUNDLED_CLI")" = "$EXPECT_ARCH"
+          "$BUNDLED_CLI" --version
           /usr/libexec/PlistBuddy -c "Delete :CFBundleIdentifier" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Delete :CFBundleShortVersionString" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Delete :CFBundleVersion" "$PLIST" 2>/dev/null || true
@@ -75,7 +98,7 @@ jobs:
           /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $BUNDLE_ID" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string 苏苏Codex全能中转站一键切换" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.21" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.21.1" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.21.2" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :LSMultipleInstancesProhibited bool true" "$PLIST"
           plutil -lint "$PLIST"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSMultipleInstancesProhibited' "$PLIST")" = "true"
@@ -90,7 +113,7 @@ jobs:
               info = plistlib.load(handle)
           assert info["CFBundleIdentifier"] == "com.susu.codex-switcher"
           assert info["LSMultipleInstancesProhibited"] is True
-          assert info["CFBundleVersion"] == "1.21.1"
+          assert info["CFBundleVersion"] == "1.21.2"
           PY
           codesign --verify --deep --strict --verbose=2 "$APP"
           mkdir -p "$RELEASE_DIR"
@@ -119,7 +142,7 @@ jobs:
           cat > "$RELEASE_DIR/使用说明.txt" <<EOF
           苏苏Codex全能中转站一键切换 macOS V1.21
           架构：$EXPECT_ARCH
-          修复：单实例单图标、Codex.app 内置 CLI 自动识别、API Key 保存到 macOS 钥匙串。
+          修复：单实例单图标、内置官方原生 Codex CLI、动态识别系统 CLI、API Key 保存到 macOS 钥匙串。
           首次打开如被 Gatekeeper 拦截，请右键“首次启动修复.command”选择打开。
           请先将 Codex 官方 App 复制到 /Applications，并至少打开一次。
           EOF
