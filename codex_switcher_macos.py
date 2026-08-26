@@ -6,9 +6,13 @@ Codex 供应商切换器 macOS 版本
 支持读取模型、使用中转站和切换 GPT 账号登录。
 """
 
+import copy
 import json
 import os
+import pathlib
 import platform
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -22,34 +26,42 @@ from tkinter import messagebox, ttk
 APP_NAME = "苏苏全能中转站一键切换"
 APP_VERSION = "1.4-macOS"
 
-# ---------------- 真实配置目录（CODEX_HOME 优先，回退 ~/.codex） ----------------
+# ---------------- Codex 双配置目录 ----------------
 def resolve_codex_dir():
+    """CLI 使用 CODEX_HOME；官方桌面端固定读取 ~/.codex。"""
     home = os.environ.get("CODEX_HOME") or ""
-    if home and os.path.isdir(home):
-        return home
+    if home:
+        return os.path.abspath(os.path.expanduser(os.path.expandvars(home)))
     return os.path.join(os.path.expanduser("~"), ".codex")
 
 
 CODEX_DIR = resolve_codex_dir()
+DESKTOP_CODEX_DIR = os.path.join(os.path.expanduser("~"), ".codex")
 CONFIG_PATH = os.path.join(CODEX_DIR, "config.toml")
 AUTH_PATH = os.path.join(CODEX_DIR, "auth.json")
+DESKTOP_CONFIG_PATH = os.path.join(DESKTOP_CODEX_DIR, "config.toml")
+DESKTOP_AUTH_PATH = os.path.join(DESKTOP_CODEX_DIR, "auth.json")
 SW_DIR = os.path.join(CODEX_DIR, "provider-switcher")
 PROVIDERS_FILE = os.path.join(SW_DIR, "providers.json")
 BACKUP_DIR = os.path.join(SW_DIR, "backups")
+OFFICIAL_AUTH_BACKUP_PATH = os.path.join(SW_DIR, "official-auth-backup.json")
+OFFICIAL_AUTH_BACKUP_META_PATH = os.path.join(SW_DIR, "official-auth-backup.meta.json")
+RECOVERY_AUTH_BACKUP_PATH = os.path.join(SW_DIR, "pre-switch-auth-recovery.json")
+RECOVERY_AUTH_BACKUP_META_PATH = os.path.join(SW_DIR, "pre-switch-auth-recovery.meta.json")
 
 WIRE_RESPONSES = "responses"
 WIRE_CHAT = "chat_completions"
+SWITCH_LOCK = threading.Lock()
+PROVIDER_KEY_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 # ---------------- macOS shell profile for env vars ----------------
 def get_shell_profile():
     """Return the shell profile path for setting environment variables."""
     home = os.path.expanduser("~")
-    # Prefer .zshrc (default on macOS since Catalina)
     zshrc = os.path.join(home, ".zshrc")
-    bash_profile = os.path.join(home, ".bash_profile")
     if os.path.exists(zshrc) or os.environ.get("SHELL", "").endswith("zsh"):
         return zshrc
-    return bash_profile
+    return os.path.join(home, ".bash_profile")
 
 
 # ---------------- 默认预置供应商（首次运行写入 providers.json） ----------------
@@ -86,26 +98,96 @@ DEFAULT_PROVIDERS = [
 
 # ============================ 核心逻辑（无 GUI 依赖，可单测） ============================
 
+def validate_provider_key(provider_key):
+    provider_key = str(provider_key or "").strip()
+    if not PROVIDER_KEY_PATTERN.fullmatch(provider_key):
+        raise ValueError("供应商 key 仅允许小写字母、数字、下划线和短横线，且长度不超过 64")
+    return provider_key
+
+
+def providers_without_secrets(providers):
+    """providers.json 只保存结构，不保存 API Key。"""
+    clean = copy.deepcopy(providers)
+    for provider in clean:
+        provider["api_key"] = ""
+    return clean
+
+
+def atomic_write_text(path, text, mode=None):
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    temp_path = "%s.%s.%s.tmp" % (path, os.getpid(), threading.get_ident())
+    try:
+        with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+        if mode is not None:
+            os.chmod(path, mode)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def migrate_provider_secrets(providers):
+    """迁移旧明文密钥；任一持久化失败时不返回脱敏数据。"""
+    clean = copy.deepcopy(providers)
+    migrated = 0
+    for provider in clean:
+        provider_key = validate_provider_key(provider.get("key"))
+        api_key = str(provider.get("api_key") or "").strip()
+        if api_key:
+            env_name = "%s_API_KEY" % provider_key.upper()
+            set_user_env_macos(env_name, api_key)
+            os.environ[env_name] = api_key
+            migrated += 1
+        provider["api_key"] = ""
+    return clean, migrated
+
+
 def load_providers():
-    """加载供应商列表；优先真实目录，其次迁移旧位置。"""
-    if os.path.exists(PROVIDERS_FILE):
+    """加载供应商；旧明文密钥成功持久化后立即原子脱敏。"""
+    candidates = [PROVIDERS_FILE]
+    legacy = os.path.join(DESKTOP_CODEX_DIR, "provider-switcher", "providers.json")
+    if os.path.normcase(os.path.abspath(legacy)) != os.path.normcase(os.path.abspath(PROVIDERS_FILE)):
+        candidates.append(legacy)
+
+    found_existing = False
+    last_error = None
+    for candidate in candidates:
+        if not os.path.exists(candidate):
+            continue
+        found_existing = True
         try:
-            with open(PROVIDERS_FILE, "r", encoding="utf-8") as f:
+            with open(candidate, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if isinstance(data, list) and data:
-                return data
-        except Exception:
-            pass
-    os.makedirs(SW_DIR, exist_ok=True)
-    with open(PROVIDERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(DEFAULT_PROVIDERS, f, ensure_ascii=False, indent=2)
-    return json.loads(json.dumps(DEFAULT_PROVIDERS, ensure_ascii=False))
+            if not isinstance(data, list) or not data:
+                raise ValueError("供应商文件不是有效的非空列表")
+            clean, migrated = migrate_provider_secrets(data)
+            if candidate != PROVIDERS_FILE or migrated or clean != data:
+                save_providers(clean)
+            return clean
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    if found_existing:
+        raise RuntimeError("读取或迁移现有供应商配置失败，原文件已保留：%s" % last_error)
+
+    clean = providers_without_secrets(DEFAULT_PROVIDERS)
+    save_providers(clean)
+    return copy.deepcopy(clean)
 
 
 def save_providers(providers):
-    os.makedirs(SW_DIR, exist_ok=True)
-    with open(PROVIDERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(providers, f, ensure_ascii=False, indent=2)
+    payload = json.dumps(providers_without_secrets(providers), ensure_ascii=False, indent=2)
+    atomic_write_text(PROVIDERS_FILE, payload)
 
 
 def parse_toml(path):
@@ -137,133 +219,157 @@ def parse_toml(path):
     return result
 
 
+def toml_string(value):
+    """用 JSON 双引号转义生成兼容 TOML basic string 的安全字符串。"""
+    return json.dumps(str(value), ensure_ascii=False)
+
+
 def build_config_text(provider, existing_config=""):
-    """生成 config.toml 内容（AIVR 风格）：
-    model_provider = <key>；自定义供应商写 [model_providers.<key>]（env_key 方式）；
-    保留现有所有原生配置（desktop/projects/plugins/mcp_servers/marketplaces 等）。"""
+    """安全更新 config.toml：顶层模型键置顶，目标 Provider 段置于末尾。"""
+    provider_key = validate_provider_key(provider["key"])
+    target_section = "model_providers.%s" % provider_key
     preserved = []
-    in_provider_section = False
-    if existing_config:
-        for line in existing_config.splitlines():
-            stripped = line.strip()
-            if (stripped.startswith("model_provider") or stripped.startswith("model =")
-                    or stripped.startswith("disable_response_storage")
-                    or stripped.startswith("model_context_window")
-                    or stripped.startswith("model_auto_compact_token_limit")):
-                continue
-            if stripped.startswith("[model_providers"):
-                in_provider_section = True
-                continue
-            if in_provider_section and stripped.startswith("[") and not stripped.startswith("[model_providers"):
-                in_provider_section = False
-            if in_provider_section:
-                continue
-            preserved.append(line)
+    lifted_top_level = []
+    current_section = None
+    skip_target_section = False
+    known_top_level_keys = {
+        "approval_policy", "sandbox_mode", "web_search", "personality",
+        "disable_response_storage", "model_context_window",
+        "model_auto_compact_token_limit", "model_reasoning_effort",
+        "model_reasoning_summary", "model_verbosity", "hide_agent_reasoning",
+        "show_raw_agent_reasoning", "file_opener", "notify",
+    }
 
-    header = [
-        'model_provider = "%s"' % provider["key"],
-        'model = "%s"' % provider["model"],
+    old_provider_key = ""
+    for line in existing_config.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            break
+        if "=" in stripped and not stripped.startswith("#"):
+            key_name, value = stripped.split("=", 1)
+            if key_name.strip() == "model_provider":
+                old_provider_key = value.strip().strip('"').strip("'")
+                break
+    damaged_section = "model_providers.%s" % old_provider_key if old_provider_key else ""
+
+    for line in existing_config.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current_section = stripped.strip("[]").strip()
+            skip_target_section = current_section == target_section
+            if skip_target_section:
+                continue
+        key_name = ""
+        if "=" in stripped and not stripped.startswith("#"):
+            key_name = stripped.split("=", 1)[0].strip()
+        if skip_target_section:
+            if key_name in known_top_level_keys:
+                lifted_top_level.append(line)
+            continue
+        if current_section == damaged_section and key_name in known_top_level_keys:
+            lifted_top_level.append(line)
+            continue
+        if current_section is None and key_name in {"model_provider", "model"}:
+            continue
+        preserved.append(line)
+
+    while preserved and not preserved[0].strip():
+        preserved.pop(0)
+    while preserved and not preserved[-1].strip():
+        preserved.pop()
+
+    lines = [
+        "model_provider = %s" % toml_string(provider_key),
+        "model = %s" % toml_string(provider["model"]),
     ]
-    if provider["key"] != "openai":
-        header += [
-            "",
-            "[model_providers.%s]" % provider["key"],
-            'name = "%s"' % provider["name"],
-            'base_url = "%s"' % provider["base_url"].rstrip("/"),
-            'wire_api = "%s"' % provider["wire_api"],
-            'env_key = "%s_API_KEY"' % provider["key"].upper(),
-            "",
-        ]
-
+    lines.extend(lifted_top_level)
     if preserved:
-        while preserved and preserved[0] == "":
-            preserved.pop(0)
-        while preserved and preserved[-1] == "":
-            preserved.pop()
-        return "\n".join(header + preserved) + "\n"
+        lines.extend([""] + preserved)
     else:
-        return "\n".join(header + [
+        lines.extend(["", "[features]", "goals = true"])
+    if provider_key != "openai":
+        lines.extend([
             "",
-            "[features]",
-            "goals = true",
-            "",
+            "[model_providers.%s]" % provider_key,
+            "name = %s" % toml_string(provider["name"]),
+            "base_url = %s" % toml_string(provider["base_url"].rstrip("/")),
+            "wire_api = %s" % toml_string(provider["wire_api"]),
+            "env_key = %s" % toml_string("%s_API_KEY" % provider_key.upper()),
         ])
+    return "\n".join(lines).rstrip() + "\n"
 
 
-def backup_config():
-    """切换前备份现有 config.toml，返回备份路径或 None。"""
-    if not os.path.exists(CONFIG_PATH):
+def backup_config(path=CONFIG_PATH, label="cli"):
+    """切换前备份指定 config.toml，返回备份路径或 None。"""
+    if not os.path.exists(path):
         return None
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    ts = time.strftime("%Y%m%d-%H%M%S")
-    dst = os.path.join(BACKUP_DIR, "config-%s.toml" % ts)
-    shutil.copy2(CONFIG_PATH, dst)
+    ts = time.strftime("%Y%m%d-%H%M%S") + ("-%03d" % (time.time_ns() % 1000))
+    dst = os.path.join(BACKUP_DIR, "config-%s-%s.toml" % (label, ts))
+    shutil.copy2(path, dst)
     return dst
 
 
 def set_user_env_macos(name, value):
-    """写入用户级环境变量到 shell profile（~/.zshrc 或 ~/.bash_profile）。
-    macOS 没有 Windows 注册表那样的用户级环境变量机制，
-    需要写入 shell profile 文件。"""
+    """安全、原子地写 shell profile；值使用 POSIX shell 转义，文件权限为 0600。"""
     if not value:
         return
+    if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name):
+        raise ValueError("环境变量名不安全")
     profile = get_shell_profile()
     marker_begin = "# >>> Codex Provider Switcher: %s >>>" % name
     marker_end = "# <<< Codex Provider Switcher: %s <<<" % name
-
-    # Read existing content
     content = ""
     if os.path.exists(profile):
-        try:
-            with open(profile, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-        except Exception:
-            content = ""
+        with open(profile, "r", encoding="utf-8", errors="strict") as f:
+            content = f.read()
 
-    # Remove old entry
-    lines = content.splitlines()
     new_lines = []
     skipping = False
-    for line in lines:
-        if marker_begin in line:
+    for line in content.splitlines():
+        if line == marker_begin:
             skipping = True
             continue
-        if marker_end in line:
+        if line == marker_end:
             skipping = False
             continue
         if not skipping:
             new_lines.append(line)
-
-    # Add new entry
-    export_line = 'export %s="%s"' % (name, value)
-    new_lines.append("")
-    new_lines.append(marker_begin)
-    new_lines.append(export_line)
-    new_lines.append(marker_end)
-
-    try:
-        with open(profile, "w", encoding="utf-8") as f:
-            f.write("\n".join(new_lines) + "\n")
-    except Exception as e:
-        print("Failed to write shell profile: %s" % e)
+    if skipping:
+        raise RuntimeError("shell profile 中的密钥配置标记不完整")
+    new_lines.extend(["", marker_begin, "export %s=%s" % (name, shlex.quote(value)), marker_end])
+    atomic_write_text(profile, "\n".join(new_lines) + "\n", mode=0o600)
+    os.environ[name] = value
 
 
 def get_user_env_macos(name):
-    """从 shell profile 读取环境变量值。"""
+    """读取本进程或本工具在 shell profile 中保存的环境变量。"""
+    if os.environ.get(name):
+        return os.environ[name]
     profile = get_shell_profile()
     if not os.path.exists(profile):
         return None
+    marker_begin = "# >>> Codex Provider Switcher: %s >>>" % name
+    marker_end = "# <<< Codex Provider Switcher: %s <<<" % name
+    in_block = False
     try:
-        with open(profile, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("export %s=" % name):
-                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    return val if val else None
-    except Exception:
-        pass
-    # Also check current process env (may be set in current session)
-    return os.environ.get(name)
+        with open(profile, "r", encoding="utf-8", errors="strict") as f:
+            for raw in f:
+                line = raw.strip()
+                if line == marker_begin:
+                    in_block = True
+                    continue
+                if line == marker_end:
+                    in_block = False
+                    continue
+                if in_block and line.startswith("export %s=" % name):
+                    tokens = shlex.split(line[len("export "):], posix=True)
+                    if len(tokens) == 1 and tokens[0].startswith(name + "="):
+                        value = tokens[0].split("=", 1)[1]
+                        return value or None
+    except (OSError, ValueError):
+        return None
+    return None
 
 
 def find_codex_cli():
@@ -291,74 +397,242 @@ def find_codex_cli():
     return "codex"
 
 
-def write_auth(api_key):
-    """合并写入 auth.json 的 OPENAI_API_KEY（保留已有登录 token 等字段）。"""
-    if not api_key:
+def current_api_key(provider):
+    """优先使用本次表单输入，否则沿用用户环境持久层。"""
+    return provider.get("api_key") or get_user_env_macos(
+        "%s_API_KEY" % provider["key"].upper()
+    ) or ""
+
+
+def config_targets():
+    targets = [(CONFIG_PATH, "cli")]
+    if os.path.normcase(os.path.abspath(DESKTOP_CONFIG_PATH)) != os.path.normcase(os.path.abspath(CONFIG_PATH)):
+        targets.append((DESKTOP_CONFIG_PATH, "desktop"))
+    return targets
+
+
+def write_provider_to_target(provider, config_path):
+    existing = ""
+    if os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as f:
+            existing = f.read()
+    atomic_write_text(config_path, build_config_text(provider, existing))
+
+
+def ensure_api_key_login(cli, api_key, codex_home=DESKTOP_CODEX_DIR):
+    """使用官方登录命令；API Key 仅经 stdin 传递，桌面 CODEX_HOME 固定为 ~/.codex。"""
+    env = os.environ.copy()
+    env["CODEX_HOME"] = codex_home
+    result = subprocess.run(
+        [cli, "login", "--with-api-key"], input=api_key + "\n", text=True,
+        capture_output=True, timeout=45, env=env,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "未知错误").strip().replace(api_key, "***")
+        raise RuntimeError(detail)
+
+
+def snapshot_file(path):
+    return pathlib.Path(path).read_bytes() if os.path.exists(path) else None
+
+
+def restore_file_snapshot(path, content):
+    if content is None:
+        if os.path.exists(path):
+            os.remove(path)
         return
-    auth = {}
-    if os.path.exists(AUTH_PATH):
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    temp_path = "%s.%s.%s.restore.tmp" % (path, os.getpid(), threading.get_ident())
+    try:
+        pathlib.Path(temp_path).write_bytes(content)
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+def backup_official_auth():
+    """保存切到第三方前的官方桌面认证。"""
+    auth_content = snapshot_file(DESKTOP_AUTH_PATH)
+    restore_file_snapshot(OFFICIAL_AUTH_BACKUP_PATH, auth_content)
+    atomic_write_text(
+        OFFICIAL_AUTH_BACKUP_META_PATH,
+        json.dumps({
+            "version": 1, "had_auth": auth_content is not None,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }, ensure_ascii=False, indent=2),
+    )
+    return auth_content is not None
+
+
+def write_recovery_auth_snapshot(previous_provider):
+    auth_content = snapshot_file(DESKTOP_AUTH_PATH)
+    if auth_content is None:
+        return False
+    restore_file_snapshot(RECOVERY_AUTH_BACKUP_PATH, auth_content)
+    atomic_write_text(
+        RECOVERY_AUTH_BACKUP_META_PATH,
+        json.dumps({
+            "version": 1, "previous_provider": previous_provider or "unknown",
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }, ensure_ascii=False, indent=2),
+    )
+    return True
+
+
+def restore_official_auth():
+    if not os.path.exists(OFFICIAL_AUTH_BACKUP_META_PATH):
+        raise RuntimeError("未找到第三方登录前的官方认证备份，请先在 Codex 中完成 OpenAI 官方登录")
+    try:
+        metadata = json.loads(pathlib.Path(OFFICIAL_AUTH_BACKUP_META_PATH).read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError("官方认证备份元数据损坏：%s" % exc)
+    if not metadata.get("had_auth") or not os.path.exists(OFFICIAL_AUTH_BACKUP_PATH):
+        raise RuntimeError("没有可恢复的 OpenAI 官方认证，请重新登录官方账号")
+    restore_file_snapshot(DESKTOP_AUTH_PATH, snapshot_file(OFFICIAL_AUTH_BACKUP_PATH))
+
+
+def transaction_paths(include_auth_backups=True):
+    paths = [path for path, _ in config_targets()]
+    paths.extend([DESKTOP_AUTH_PATH, PROVIDERS_FILE])
+    if include_auth_backups:
+        paths.extend([
+            OFFICIAL_AUTH_BACKUP_PATH, OFFICIAL_AUTH_BACKUP_META_PATH,
+            RECOVERY_AUTH_BACKUP_PATH, RECOVERY_AUTH_BACKUP_META_PATH,
+        ])
+    return list(dict.fromkeys(paths))
+
+
+def restore_snapshots(snapshots):
+    errors = []
+    for path, content in snapshots.items():
         try:
-            with open(AUTH_PATH, "r", encoding="utf-8") as f:
-                auth = json.load(f)
-        except Exception:
-            auth = {}
-    auth["OPENAI_API_KEY"] = api_key
-    with open(AUTH_PATH, "w", encoding="utf-8") as f:
-        json.dump(auth, f, indent=2, ensure_ascii=False)
+            restore_file_snapshot(path, content)
+        except Exception as exc:
+            errors.append("%s: %s" % (path, exc))
+    return errors
 
 
 def switch_provider(provider):
-    """核心切换：备份 -> 写 config.toml -> 环境变量；保留第三方登录态。"""
+    """后台可调用的事务切换；正常流程绝不执行 logout。"""
+    if not SWITCH_LOCK.acquire(blocking=False):
+        return False, ["已有切换或账号操作正在进行，请稍候"]
+    try:
+        return _switch_provider_locked(copy.deepcopy(provider))
+    finally:
+        SWITCH_LOCK.release()
+
+
+def _switch_provider_locked(provider):
     msgs = []
     if not provider.get("model"):
         return False, ["未选择模型，无法切换"]
+    try:
+        provider["key"] = validate_provider_key(provider.get("key"))
+    except ValueError as exc:
+        return False, [str(exc)]
+    key = current_api_key(provider)
+    if provider["key"] != "openai" and not key:
+        return False, ["缺少 API Key，请填写后再切换"]
 
-    # 1. 备份
-    bak = backup_config()
-    if bak:
-        msgs.append("已备份旧配置 -> %s" % os.path.basename(bak))
-    else:
-        msgs.append("无旧配置，跳过备份")
+    targets = config_targets()
+    snapshots = {path: snapshot_file(path) for path in transaction_paths()}
+    previous_provider = parse_toml(DESKTOP_CONFIG_PATH).get("model_provider", "")
+    try:
+        if provider["key"] != "openai" and write_recovery_auth_snapshot(previous_provider):
+            msgs.append("已保存本次登录前的认证恢复快照")
+        if (provider["key"] != "openai" and os.path.exists(DESKTOP_AUTH_PATH)
+                and previous_provider in {"", "openai"}):
+            backup_official_auth()
+            msgs.append("已保存切换第三方前的 OpenAI 官方认证")
 
-    # 2. 写 config.toml
-    existing = ""
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                existing = f.read()
-        except Exception:
-            pass
-    os.makedirs(CODEX_DIR, exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        f.write(build_config_text(provider, existing))
-    msgs.append("config.toml 已写入 (provider=%s, model=%s) -> %s"
-                % (provider["key"], provider["model"], CONFIG_PATH))
+        for config_path, label in targets:
+            bak = backup_config(config_path, label)
+            if bak:
+                msgs.append("已备份 %s 配置 -> %s" % (label, os.path.basename(bak)))
+            write_provider_to_target(provider, config_path)
+            msgs.append("%s 配置已同步 -> %s" % (label, config_path))
 
-    # 3. API Key 写入 shell profile 环境变量
-    env_name = "%s_API_KEY" % provider["key"].upper()
-    if provider.get("api_key"):
-        set_user_env_macos(env_name, provider["api_key"])
-        msgs.append("环境变量 %s 已写入 %s" % (env_name, os.path.basename(get_shell_profile())))
-    else:
-        cur = get_user_env_macos(env_name)
-        if cur:
-            msgs.append("沿用已有环境变量 %s" % env_name)
+        if provider["key"] == "openai":
+            if previous_provider not in {"", "openai"}:
+                restore_official_auth()
+                msgs.append("OpenAI 官方认证已恢复")
         else:
-            msgs.append("注意：%s 未设置，请在表单填写 API Key 后重新切换" % env_name)
+            ensure_api_key_login(find_codex_cli(), key, DESKTOP_CODEX_DIR)
+            env_name = "%s_API_KEY" % provider["key"].upper()
+            set_user_env_macos(env_name, key)
+            os.environ[env_name] = key
+            msgs.append("官方桌面端第三方 API Key 登录态已建立")
 
-    # 4. auth.json
-    write_auth(provider.get("api_key") or "")
-    msgs.append("auth.json 已处理")
+        providers = load_providers()
+        for saved_provider in providers:
+            saved_provider["active"] = saved_provider["key"] == provider["key"]
+        save_providers(providers)
+    except Exception as exc:
+        rollback_errors = restore_snapshots(snapshots)
+        error_text = str(exc).replace(key, "***") if key else str(exc)
+        if rollback_errors:
+            return False, msgs + ["切换失败，且部分回滚未完成：%s；%s" % (error_text, " | ".join(rollback_errors))]
+        return False, msgs + ["切换失败，配置、认证与供应商状态已回滚：%s" % error_text]
 
-    # 5. 记忆当前选择
-    providers = load_providers()
-    for p in providers:
-        p["active"] = (p["key"] == provider["key"])
-    save_providers(providers)
-
-    # 使用中转站时禁止 logout，否则会删除刚建立的第三方登录态。
-    msgs.append("已保留第三方登录态（未执行 codex logout）")
+    msgs.append("未执行 codex logout（保留第三方 API Key 登录态）")
     return True, msgs
+
+
+def switch_gpt_account_flow(cli=None, cwd=None):
+    """专用账号切换事务：双 config 切官方、logout、启动；失败完整回滚。"""
+    if not SWITCH_LOCK.acquire(blocking=False):
+        return False, ["已有切换或账号操作正在进行，请稍候"]
+    try:
+        return _switch_gpt_account_locked(cli or find_codex_cli(), cwd or os.getcwd())
+    finally:
+        SWITCH_LOCK.release()
+
+
+def _switch_gpt_account_locked(cli, cwd):
+    snapshots = {path: snapshot_file(path) for path in transaction_paths()}
+    openai_provider = copy.deepcopy(next(
+        (p for p in load_providers() if p.get("key") == "openai"), DEFAULT_PROVIDERS[2]
+    ))
+    env = os.environ.copy()
+    env["CODEX_HOME"] = DESKTOP_CODEX_DIR
+    try:
+        for config_path, _label in config_targets():
+            write_provider_to_target(openai_provider, config_path)
+        providers = load_providers()
+        for provider in providers:
+            provider["active"] = provider.get("key") == "openai"
+        save_providers(providers)
+
+        result = subprocess.run(
+            [cli, "logout"], capture_output=True, text=True, timeout=30, env=env,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "返回码 %d" % result.returncode).strip()
+            raise RuntimeError("退出当前账号失败：%s" % detail)
+
+        launch = subprocess.run(
+            [cli, "app", cwd], capture_output=True, text=True, timeout=20, env=env,
+        )
+        if launch.returncode == 0:
+            return True, ["已退出当前账号并通过 codex app 打开 Codex，请选择新的 GPT 账号登录"]
+        first_detail = (launch.stderr or launch.stdout or "返回码 %d" % launch.returncode).strip()
+        try:
+            fallback = subprocess.run(
+                ["open", "-a", "Codex"], capture_output=True, text=True, timeout=20, env=env,
+            )
+            if fallback.returncode != 0:
+                detail = (fallback.stderr or fallback.stdout or "返回码 %d" % fallback.returncode).strip()
+                raise RuntimeError(detail)
+        except Exception as exc:
+            raise RuntimeError("codex app 启动失败（%s），备用入口也失败：%s" % (first_detail, exc))
+        return True, ["codex app 未成功，已通过系统应用入口打开 Codex，请选择新的 GPT 账号登录"]
+    except Exception as exc:
+        rollback_errors = restore_snapshots(snapshots)
+        if rollback_errors:
+            return False, ["切换账号失败，且部分回滚未完成：%s；%s" % (exc, " | ".join(rollback_errors))]
+        return False, ["切换账号失败，原 config/auth/providers 已恢复：%s" % exc]
 
 
 def read_status():
@@ -393,16 +667,8 @@ def read_status():
 
     env_key_name = section.get("env_key", "")
     has_env = bool(env_key_name and (os.environ.get(env_key_name) or get_user_env_macos(env_key_name)))
-    auth_ok = False
-    if os.path.exists(AUTH_PATH):
-        try:
-            with open(AUTH_PATH, "r", encoding="utf-8") as f:
-                auth = json.load(f)
-            auth_ok = bool(auth.get("OPENAI_API_KEY"))
-        except Exception:
-            pass
-    if not (has_env or auth_ok):
-        errors.append("缺少 API Key（环境变量 %s / auth.json 均未设置）" % env_key_name)
+    if not has_env:
+        errors.append("缺少 API Key（用户环境变量 %s 未设置）" % env_key_name)
     else:
         valid = True
     return key, name, model, valid, errors
@@ -430,6 +696,7 @@ class App:
         self.root = root
         self.providers = load_providers()
         self.selected_key = None
+        self.operation_active = False
 
         root.title("%s v%s" % (APP_NAME, APP_VERSION))
         root.geometry("860x620")
@@ -571,7 +838,8 @@ class App:
         self.selected_key = p["key"]
         self.vars["name"].set(p.get("name", ""))
         self.vars["base_url"].set(p.get("base_url", ""))
-        self.vars["api_key"].set(p.get("api_key", ""))
+        saved_key = get_user_env_macos("%s_API_KEY" % p["key"].upper())
+        self.vars["api_key"].set("********" if saved_key else "")
         self.wire_var.set(p.get("wire_api", WIRE_RESPONSES))
         models = p.get("models") or []
         self.model_combo["values"] = models
@@ -583,7 +851,8 @@ class App:
             return None
         p["name"] = self.vars["name"].get().strip()
         p["base_url"] = self.vars["base_url"].get().strip()
-        p["api_key"] = self.vars["api_key"].get().strip()
+        entered_key = self.vars["api_key"].get().strip()
+        p["api_key"] = entered_key if entered_key and set(entered_key) != {"*"} else ""
         p["wire_api"] = self.wire_var.get()
         p["model"] = self.vars["model"].get().strip()
         models = list(self.model_combo["values"]) or []
@@ -593,19 +862,52 @@ class App:
         return p
 
     # ---------- 操作 ----------
+    def begin_operation(self):
+        if self.operation_active:
+            messagebox.showwarning("请稍候", "已有操作正在进行")
+            return False
+        self.operation_active = True
+        return True
+
+    def end_operation(self):
+        self.operation_active = False
+
+    def ensure_idle(self):
+        if self.operation_active:
+            messagebox.showwarning("请稍候", "已有操作正在进行")
+            return False
+        return True
+
     def do_switch(self):
+        if not self.begin_operation():
+            return
         p = self.collect_current()
         if not p:
+            self.end_operation()
             messagebox.showwarning("提示", "请先选择供应商")
             return
         if not p["name"] or not p["base_url"] or not p["model"]:
+            self.end_operation()
             messagebox.showwarning("提示", "名称、API 地址、模型均为必填")
             return
-        ok, msgs = switch_provider(p)
-        save_providers(self.providers)
-        for m in msgs:
-            self.log(m)
+        operation_key = p["key"]
+        self.log("正在后台同步供应商配置...")
+        threading.Thread(
+            target=self._switch_worker, args=(copy.deepcopy(p), operation_key), daemon=True
+        ).start()
+
+    def _switch_worker(self, provider, operation_key):
+        ok, msgs = switch_provider(provider)
+        self.root.after(0, lambda: self._switch_finished(ok, msgs, operation_key))
+
+    def _switch_finished(self, ok, msgs, operation_key):
+        self.end_operation()
+        for msg in msgs:
+            self.log(msg)
         if ok:
+            for provider in self.providers:
+                provider["active"] = provider["key"] == operation_key
+                provider["api_key"] = ""
             self.log("✔ 切换完成！请完全退出并重新打开 Codex 桌面端")
             self.log("⚠️ 新终端需 source ~/.zshrc 或重开终端才能生效环境变量")
             self.refresh_list()
@@ -614,6 +916,8 @@ class App:
             messagebox.showerror("切换失败", "\n".join(msgs))
 
     def save_current(self):
+        if not self.ensure_idle():
+            return
         p = self.collect_current()
         if not p:
             return
@@ -625,6 +929,8 @@ class App:
         self.refresh_list()
 
     def add_provider(self):
+        if not self.ensure_idle():
+            return
         from tkinter import simpledialog
         name = simpledialog.askstring("添加供应商", "供应商名称（如 VAKV）：", parent=self.root)
         if not name:
@@ -646,6 +952,8 @@ class App:
         self.log("已添加供应商「%s」(key=%s)" % (name, key))
 
     def delete_provider(self):
+        if not self.ensure_idle():
+            return
         p = self.current_provider()
         if not p:
             return
@@ -658,80 +966,80 @@ class App:
         self.log("已删除供应商「%s」" % p["name"])
 
     def fetch_models_async(self):
+        if not self.begin_operation():
+            return
         base = self.vars["base_url"].get().strip()
-        key = self.vars["api_key"].get().strip()
+        entered = self.vars["api_key"].get().strip()
+        provider = self.current_provider()
+        provider_key = provider["key"] if provider else ""
+        key = entered if entered and set(entered) != {"*"} else (
+            current_api_key(provider) if provider else ""
+        )
         if not base:
+            self.end_operation()
             messagebox.showwarning("提示", "请先填写 API 地址")
             return
         self.log("正在拉取 %s/models ..." % base)
-        threading.Thread(target=self._fetch_worker, args=(base, key), daemon=True).start()
+        threading.Thread(target=self._fetch_worker, args=(base, key, provider_key), daemon=True).start()
 
-    def _fetch_worker(self, base, key):
+    def _fetch_worker(self, base, key, provider_key):
         try:
             ids = fetch_models(base, key)
         except urllib.error.HTTPError as e:
-            self.log("✘ 拉取失败 HTTP %s: %s" % (e.code, e.reason))
+            message = "✘ 拉取失败 HTTP %s: %s" % (e.code, e.reason)
+            self.root.after(0, lambda msg=message: self._fetch_failed(msg))
             return
         except Exception as e:
-            self.log("✘ 拉取失败: %s" % e)
+            message = "✘ 拉取失败: %s" % e
+            self.root.after(0, lambda msg=message: self._fetch_failed(msg))
             return
-        self.root.after(0, lambda: self._apply_models(ids))
+        self.root.after(0, lambda: self._apply_models(ids, provider_key))
 
-    def _apply_models(self, ids):
-        self.model_combo["values"] = ids
-        p = self.current_provider()
+    def _fetch_failed(self, message):
+        self.end_operation()
+        self.log(message)
+
+    def _apply_models(self, ids, provider_key):
+        self.end_operation()
+        p = next((item for item in self.providers if item["key"] == provider_key), None)
         if p:
             p["models"] = ids
             save_providers(self.providers)
+        if self.selected_key != provider_key:
+            self.log("✔ 已拉取 %d 个模型并保存到原供应商" % len(ids))
+            return
+        self.model_combo["values"] = ids
         if ids and not self.vars["model"].get():
             self.vars["model"].set(ids[0])
         self.log("✔ 拉取到 %d 个模型" % len(ids))
 
     def switch_gpt_account(self):
-        """退出当前 Codex 登录态并打开登录页面，让用户选择新的 GPT 账号。"""
+        """确认后后台执行专用账号切换事务；取消时不产生任何变化。"""
         if not messagebox.askyesno(
             "切换 GPT 账号登录",
             "将停用当前中转站并退出当前 Codex 登录账号，然后打开登录页面。\n\n是否继续？",
         ):
             return
+        if not self.begin_operation():
+            return
         self.log("正在切换 GPT 账号登录...")
         threading.Thread(target=self._switch_gpt_account_worker, daemon=True).start()
 
     def _switch_gpt_account_worker(self):
-        cli = find_codex_cli()
-        try:
-            openai_provider = next(
-                (dict(p) for p in self.providers if p.get("key") == "openai"),
-                dict(DEFAULT_PROVIDERS[2]),
-            )
-            existing = ""
-            if os.path.exists(CONFIG_PATH):
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                    existing = f.read()
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                f.write(build_config_text(openai_provider, existing))
-            result = subprocess.run([cli, "logout"], capture_output=True, text=True, timeout=30)
-            if result.returncode != 0:
-                detail = (result.stderr or result.stdout or "返回码 %d" % result.returncode).strip()
-                raise RuntimeError("退出当前账号失败：%s" % detail)
-            launched = False
-            try:
-                app_result = subprocess.run(
-                    [cli, "app", os.getcwd()], capture_output=True, text=True, timeout=20
-                )
-                launched = app_result.returncode == 0
-            except Exception:
-                launched = False
-            if not launched:
-                subprocess.Popen(["open", "-a", "Codex"])
-            self.root.after(0, lambda: self._account_switch_finished())
-        except Exception as exc:
-            error_text = str(exc)
-            self.root.after(0, lambda msg=error_text: messagebox.showerror("切换账号失败", msg))
+        ok, messages = switch_gpt_account_flow()
+        self.root.after(0, lambda: self._account_switch_finished(ok, messages))
 
-    def _account_switch_finished(self):
-        self.log("✔ 已退出当前账号并打开 Codex，请选择新的 GPT 账号登录")
-        self.refresh_status()
+    def _account_switch_finished(self, ok, messages):
+        self.end_operation()
+        for message in messages:
+            self.log(("✔ " if ok else "✘ ") + message)
+        if ok:
+            for provider in self.providers:
+                provider["active"] = provider.get("key") == "openai"
+            self.refresh_list()
+            self.refresh_status()
+        else:
+            messagebox.showerror("切换账号失败", "\n".join(messages))
 
     def open_config(self):
         if not os.path.exists(CONFIG_PATH):
@@ -743,6 +1051,8 @@ class App:
             messagebox.showerror("打开失败", str(e))
 
     def manage_backups(self):
+        if not self.ensure_idle():
+            return
         if not os.path.isdir(BACKUP_DIR):
             messagebox.showinfo("备份", "暂无备份（切换供应商时会自动备份旧配置）")
             return
@@ -792,9 +1102,11 @@ class App:
 
 
 def re_key(name):
-    """由名称生成 key（小写 ascii，失败则用 provider）。"""
-    k = "".join(c for c in name.lower() if c.isalnum() or c in "-_")
-    return k or "provider"
+    """由名称生成安全的 ASCII provider key。"""
+    k = re.sub(r"[^a-z0-9_-]+", "-", str(name).lower()).strip("-_")
+    if not k or not k[0].isalnum():
+        k = "provider"
+    return k[:64]
 
 
 def main():

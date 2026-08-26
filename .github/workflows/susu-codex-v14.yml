@@ -3,7 +3,7 @@ name: Build SuSu Switcher macOS v1.4
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [main, master, susu-codex-v1.4-build]
 
 permissions:
   contents: read
