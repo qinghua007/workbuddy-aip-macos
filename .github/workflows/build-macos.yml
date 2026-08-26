@@ -1,107 +1,190 @@
-name: Build WorkBuddy AIP for macOS
+name: Build SuSu Switcher macOS V1.24
 
 on:
-  push:
-    branches: [main, master]
   workflow_dispatch:
+  push:
+    branches: [main, master, susu-codex-v1.24-build]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-intel:
-    name: Build Intel
-    runs-on: macos-15-intel
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            app_name: CodexSwitcher-AppleSilicon
+            artifact_name: SuSu-Switcher-AppleSilicon-V1.24
+            release_dir: release-apple-silicon
+            codex_npm_platform: darwin-arm64
+            codex_triple: aarch64-apple-darwin
+            zip_name: 苏苏Codex全能中转站一键切换-macOS-Apple-Silicon-arm64-V1.24.zip
+          - runner: macos-15-intel
+            arch: x86_64
+            app_name: CodexSwitcher-Intel
+            artifact_name: SuSu-Switcher-Intel-V1.24
+            release_dir: release-intel
+            codex_npm_platform: darwin-x64
+            codex_triple: x86_64-apple-darwin
+            zip_name: 苏苏Codex全能中转站一键切换-macOS-Intel-x86_64-V1.24.zip
+    runs-on: ${{ matrix.runner }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
-      APP_NAME: "WorkBuddy第三方AIP对接工具-Intel芯片"
-      BUNDLE_ID: "com.susu.workbuddy-aip"
+      APP_NAME: ${{ matrix.app_name }}
+      EXPECT_ARCH: ${{ matrix.arch }}
+      RELEASE_DIR: ${{ matrix.release_dir }}
+      RELEASE_ZIP: ${{ matrix.zip_name }}
+      CODEX_NPM_PLATFORM: ${{ matrix.codex_npm_platform }}
+      CODEX_TRIPLE: ${{ matrix.codex_triple }}
+      CODEX_VERSION: "0.149.1"
+      BUNDLE_ID: com.susu.codex-switcher
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          architecture: "x64"
       - name: Install dependencies
-        run: python -m pip install --upgrade pip pyinstaller pillow certifi
-      - name: Run TLS regression tests
-        run: |
-          python -m py_compile workbuddy_aip.pyw test_ssl_regression.py
-          python test_ssl_regression.py
+        run: python -m pip install --upgrade pip pyinstaller pillow certifi keyring
       - name: Generate icon
         run: |
-          python generate_icon_macos.py
+          python generate_icon.py
           iconutil -c icns icon.iconset -o susu_icon.icns
-      - name: Build Intel app
+      - name: Acquire official native Codex CLI
         run: |
+          set -euo pipefail
+          npm pack "@openai/codex@${CODEX_VERSION}-${CODEX_NPM_PLATFORM}" --pack-destination .
+          TARBALL="openai-codex-${CODEX_VERSION}-${CODEX_NPM_PLATFORM}.tgz"
+          mkdir -p bundled-codex-cli
+          tar -xzf "$TARBALL" -C bundled-codex-cli \
+            --strip-components=4 "package/vendor/${CODEX_TRIPLE}/bin/codex"
+          chmod 755 bundled-codex-cli/codex
+          test "$(lipo -archs bundled-codex-cli/codex)" = "$EXPECT_ARCH"
+          bundled-codex-cli/codex --version
+      - name: Build native app
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "$EXPECT_ARCH"
           python -m PyInstaller \
-            --noconfirm \
-            --clean \
-            --onefile \
-            --windowed \
+            --noconfirm --clean --onedir --windowed \
             --name "$APP_NAME" \
             --osx-bundle-identifier "$BUNDLE_ID" \
             --icon susu_icon.icns \
             --collect-data certifi \
-            --distpath dist-intel \
-            --workpath build-intel \
-            workbuddy_aip.pyw
-      - name: Prepare Intel release
+            --collect-all keyring \
+            --add-binary "bundled-codex-cli/codex:codex-cli" \
+            --distpath dist-native \
+            --workpath build-native \
+            codex_switcher_macos.py
+      - name: Prepare and verify release
         run: |
           set -euo pipefail
-          APP="dist-intel/$APP_NAME.app"
+          APP="dist-native/$APP_NAME.app"
           BIN="$APP/Contents/MacOS/$APP_NAME"
-          test -d "$APP"
-          test -f "$APP/Contents/Info.plist"
-          chmod 755 "$BIN"
-          /usr/libexec/PlistBuddy -c "Delete :CFBundleIdentifier" "$APP/Contents/Info.plist" 2>/dev/null || true
-          /usr/libexec/PlistBuddy -c "Delete :CFBundleShortVersionString" "$APP/Contents/Info.plist" 2>/dev/null || true
-          /usr/libexec/PlistBuddy -c "Delete :CFBundleVersion" "$APP/Contents/Info.plist" 2>/dev/null || true
-          /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $BUNDLE_ID" "$APP/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.4" "$APP/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.4.0" "$APP/Contents/Info.plist"
-          CERTIFI_PEM="$(python -c 'import certifi; print(certifi.where())')"
-          test -s "$CERTIFI_PEM"
-          grep -q "BEGIN CERTIFICATE" "$CERTIFI_PEM"
+          PLIST="$APP/Contents/Info.plist"
+          BUNDLED_CLI="$APP/Contents/Frameworks/codex-cli/codex"
+          test -f "$BIN"
+          test -f "$BUNDLED_CLI"
+          chmod 755 "$BIN" "$BUNDLED_CLI"
+          test "$(lipo -archs "$BUNDLED_CLI")" = "$EXPECT_ARCH"
+          "$BUNDLED_CLI" --version
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleIdentifier" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleShortVersionString" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleVersion" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleDisplayName" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Delete :LSMultipleInstancesProhibited" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $BUNDLE_ID" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string 苏苏Codex全能中转站一键切换" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.24" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.24.0" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :LSMultipleInstancesProhibited bool true" "$PLIST"
+          plutil -lint "$PLIST"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMultipleInstancesProhibited' "$PLIST")" = "true"
           codesign --force --deep --sign - "$APP"
-          test -x "$BIN"
-          "$BIN" --self-test-tls
-          plutil -lint "$APP/Contents/Info.plist"
-          file "$BIN"
-          test "$(lipo -archs "$BIN")" = "x86_64"
+          test "$(lipo -archs "$BIN")" = "$EXPECT_ARCH"
+          SUSU_EXPECT_ARCH="$EXPECT_ARCH" "$BIN" --self-test-package
+          test -s "$(python -c 'import certifi; print(certifi.where())')"
+          # --self-test-package 在当前原生进程中强制校验 macOS Keychain 后端。
+          PLIST_PATH="$PLIST" python - <<'PY'
+          import os, plistlib
+          with open(os.environ["PLIST_PATH"], "rb") as handle:
+              info = plistlib.load(handle)
+          assert info["CFBundleIdentifier"] == "com.susu.codex-switcher"
+          assert info["LSMultipleInstancesProhibited"] is True
+          assert info["CFBundleVersion"] == "1.24.0"
+          PY
           codesign --verify --deep --strict --verbose=2 "$APP"
-          mkdir -p release-intel
-          ditto "$APP" "release-intel/$APP_NAME.app"
-          cp "Intel芯片版-首次启动修复.command" release-intel/
-          cp "Intel芯片版-使用说明.txt" release-intel/
-          chmod 755 "release-intel/Intel芯片版-首次启动修复.command"
-          ditto -c -k --sequesterRsrc --keepParent release-intel "WorkBuddy第三方AIP对接工具-Intel芯片版-v1.4-SSL修复版.zip"
-      - name: Verify final Intel archive
-        run: |
+          mkdir -p "$RELEASE_DIR"
+          ditto "$APP" "$RELEASE_DIR/$APP_NAME.app"
+          cat > "$RELEASE_DIR/首次启动修复.command" <<EOF
+          #!/bin/bash
           set -euo pipefail
+          SCRIPT_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+          APP="\$SCRIPT_DIR/$APP_NAME.app"
+          if [[ "\$(uname -m)" != "$EXPECT_ARCH" ]]; then
+            osascript -e 'display alert "架构不匹配" message "此安装包仅适用于 $EXPECT_ARCH Mac。"' || true
+            exit 1
+          fi
+          if [[ ! -d "\$APP" ]]; then
+            osascript -e 'display alert "未找到应用" message "请把首次启动修复.command 与 $APP_NAME.app 放在同一文件夹。"' || true
+            exit 1
+          fi
+          xattr -dr com.apple.quarantine "\$APP" 2>/dev/null || true
+          xattr -cr "\$APP" 2>/dev/null || true
+          chmod 755 "\$APP/Contents/MacOS/$APP_NAME"
+          codesign --force --deep --sign - "\$APP"
+          codesign --verify --deep --strict "\$APP"
+          open "\$APP"
+          EOF
+          chmod 755 "$RELEASE_DIR/首次启动修复.command"
+          cat > "$RELEASE_DIR/使用说明.txt" <<EOF
+          苏苏Codex全能中转站一键切换 macOS V1.24
+          架构：$EXPECT_ARCH
+          修复：兼容旧签名钥匙串条目的 -25244 ACL 冲突；切换前退出旧 Codex GUI、切换后验证全新 GUI 进程、单实例单图标、内置官方原生 Codex CLI。
+          首次打开如被 Gatekeeper 拦截，请右键“首次启动修复.command”选择打开。
+          请先将 Codex 官方 App 复制到 /Applications，并至少打开一次。
+          EOF
+          ditto -c -k --sequesterRsrc --keepParent "$RELEASE_DIR" "$RELEASE_ZIP"
+          rm -rf archive-check
           mkdir archive-check
-          ditto -x -k "WorkBuddy第三方AIP对接工具-Intel芯片版-v1.4-SSL修复版.zip" archive-check
-          APP="archive-check/release-intel/WorkBuddy第三方AIP对接工具-Intel芯片.app"
-          BIN="$APP/Contents/MacOS/WorkBuddy第三方AIP对接工具-Intel芯片"
-          test -x "$BIN"
-          test "$(lipo -archs "$BIN")" = "x86_64"
-          "$BIN" --self-test-tls
-          codesign --verify --deep --strict --verbose=2 "$APP"
-          stat -f "%Sp %OLp %N" "$BIN"
-          shasum -a 256 "WorkBuddy第三方AIP对接工具-Intel芯片版-v1.4-SSL修复版.zip"
-      - name: Upload Intel release ZIP
+          ditto -x -k "$RELEASE_ZIP" archive-check
+          CHECK_BIN="archive-check/$RELEASE_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+          test -x "$CHECK_BIN"
+          test "$(lipo -archs "$CHECK_BIN")" = "$EXPECT_ARCH"
+          SUSU_EXPECT_ARCH="$EXPECT_ARCH" "$CHECK_BIN" --self-test-package
+          codesign --verify --deep --strict --verbose=2 "archive-check/$RELEASE_DIR/$APP_NAME.app"
+          shasum -a 256 "$RELEASE_ZIP"
+      - name: Upload ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: WorkBuddy第三方AIP对接工具-Intel芯片版-v1.4-SSL修复版
-          path: WorkBuddy第三方AIP对接工具-Intel芯片版-v1.4-SSL修复版.zip
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.zip_name }}
           if-no-files-found: error
           retention-days: 30
-      - name: Publish Intel release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: workbuddy-aip-intel-v1.4-ssl-fixed
-          name: WorkBuddy AIP Intel v1.4 SSL Fixed
-          body: Intel macOS Ventura 13 compatible build with certifi Mozilla CA bundle and strict HTTPS certificate verification. Packaged and verified on a macOS Intel runner.
-          prerelease: false
-          files: WorkBuddy第三方AIP对接工具-Intel芯片版-v1.4-SSL修复版.zip
 
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified ZIP files
+        uses: actions/download-artifact@v4
+        with:
+          pattern: SuSu-Switcher-*-V1.24
+          path: release-assets
+          merge-multiple: true
+      - name: Publish temporary GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test "$(find release-assets -maxdepth 1 -type f -name '*.zip' | wc -l | tr -d ' ')" = "2"
+          TAG="macos-v1.24-${GITHUB_RUN_ID}"
+          gh release create "$TAG" release-assets/*.zip \
+            --target "$GITHUB_SHA" \
+            --title "苏苏 Codex macOS V1.24 GUI 认证刷新修复版" \
+            --notes "Apple Silicon arm64 与 Intel x86_64 原生修复包。修复旧 ad-hoc 签名钥匙串条目导致的 errSecInvalidOwnerEdit(-25244)，同值不重复写、冲突原地更新、回滚先比对；第三方和 GPT 登录均直接启动官方 Codex.app 主程序，显式传递干净环境并禁用已知 GPU 合成白屏路径；并验证 GUI 新 PID、架构、包内自检、Keychain 后端、Info.plist 和代码签名。"
