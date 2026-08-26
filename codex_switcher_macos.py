@@ -25,6 +25,7 @@ import urllib.error
 import urllib.request
 
 import certifi
+import keyring
 from tkinter import messagebox, ttk
 
 APP_NAME = "苏苏全能中转站一键切换"
@@ -322,46 +323,44 @@ def validate_env_name(name):
     return str(name)
 
 
-def _keychain_command(*args):
-    security = "/usr/bin/security"
-    if not os.path.isfile(security):
-        raise FileNotFoundError("macOS 钥匙串工具不可用")
-    return [security] + list(args)
-
-
 def set_keychain_secret(name, value):
-    """写入 macOS 登录钥匙串；API Key 不落入 providers.json 或 shell profile。"""
+    """通过 Python macOS Keychain 后端写入登录钥匙串，避免密钥进入进程参数。"""
     name = validate_env_name(name)
     if not value:
         return
-    result = subprocess.run(
-        _keychain_command(
-            "add-generic-password", "-U", "-a", name,
-            "-s", KEYCHAIN_SERVICE, "-w",
-        ),
-        input=value + "\n", capture_output=True, text=True, timeout=15,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "未知错误").strip().replace(value, "***")
+    try:
+        keyring.set_password(KEYCHAIN_SERVICE, name, value)
+    except Exception as exc:
+        detail = str(exc).replace(value, "***")
         raise RuntimeError("写入 macOS 钥匙串失败：%s" % detail)
 
 
 def get_keychain_secret(name):
     name = validate_env_name(name)
     try:
-        result = subprocess.run(
-            _keychain_command(
-                "find-generic-password", "-a", name,
-                "-s", KEYCHAIN_SERVICE, "-w",
-            ),
-            capture_output=True, text=True, timeout=10,
-        )
+        value = keyring.get_password(KEYCHAIN_SERVICE, name)
     except Exception:
         return None
-    if result.returncode != 0:
-        return None
-    value = result.stdout.rstrip("\r\n")
     return value or None
+
+
+def delete_keychain_secret(name):
+    name = validate_env_name(name)
+    try:
+        keyring.delete_password(KEYCHAIN_SERVICE, name)
+    except keyring.errors.PasswordDeleteError:
+        pass
+
+
+def restore_keychain_secret(name, value):
+    if value:
+        set_keychain_secret(name, value)
+    else:
+        delete_keychain_secret(name)
+    if value:
+        os.environ[name] = value
+    else:
+        os.environ.pop(name, None)
 
 
 def _set_shell_profile_secret(name, value):
@@ -423,16 +422,11 @@ def _get_shell_profile_secret(name):
 
 
 def set_user_env_macos(name, value):
-    """API Key 以钥匙串为主存储，同时保留旧版 shell profile 兼容。"""
+    """API Key 仅写入 macOS 钥匙串；旧版 shell profile 只读迁移，不再新增明文。"""
     name = validate_env_name(name)
     if not value:
         return
     set_keychain_secret(name, value)
-    try:
-        _set_shell_profile_secret(name, value)
-    except OSError:
-        # shell profile 不是可靠主存储；只要钥匙串成功，GUI 与 Codex 启动仍可用。
-        pass
     os.environ[name] = value
 
 
@@ -585,7 +579,7 @@ def snapshot_file(path):
     return pathlib.Path(path).read_bytes() if os.path.exists(path) else None
 
 
-def restore_file_snapshot(path, content):
+def restore_file_snapshot(path, content, mode=None):
     if content is None:
         if os.path.exists(path):
             os.remove(path)
@@ -595,7 +589,11 @@ def restore_file_snapshot(path, content):
     temp_path = "%s.%s.%s.restore.tmp" % (path, os.getpid(), threading.get_ident())
     try:
         pathlib.Path(temp_path).write_bytes(content)
+        if mode is not None:
+            os.chmod(temp_path, mode)
         os.replace(temp_path, path)
+        if mode is not None:
+            os.chmod(path, mode)
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
@@ -604,13 +602,14 @@ def restore_file_snapshot(path, content):
 def backup_official_auth():
     """保存切到第三方前的官方桌面认证。"""
     auth_content = snapshot_file(DESKTOP_AUTH_PATH)
-    restore_file_snapshot(OFFICIAL_AUTH_BACKUP_PATH, auth_content)
+    restore_file_snapshot(OFFICIAL_AUTH_BACKUP_PATH, auth_content, mode=0o600)
     atomic_write_text(
         OFFICIAL_AUTH_BACKUP_META_PATH,
         json.dumps({
             "version": 1, "had_auth": auth_content is not None,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }, ensure_ascii=False, indent=2),
+        mode=0o600,
     )
     return auth_content is not None
 
@@ -619,13 +618,14 @@ def write_recovery_auth_snapshot(previous_provider):
     auth_content = snapshot_file(DESKTOP_AUTH_PATH)
     if auth_content is None:
         return False
-    restore_file_snapshot(RECOVERY_AUTH_BACKUP_PATH, auth_content)
+    restore_file_snapshot(RECOVERY_AUTH_BACKUP_PATH, auth_content, mode=0o600)
     atomic_write_text(
         RECOVERY_AUTH_BACKUP_META_PATH,
         json.dumps({
             "version": 1, "previous_provider": previous_provider or "unknown",
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }, ensure_ascii=False, indent=2),
+        mode=0o600,
     )
     return True
 
@@ -639,7 +639,7 @@ def restore_official_auth():
         raise RuntimeError("官方认证备份元数据损坏：%s" % exc)
     if not metadata.get("had_auth") or not os.path.exists(OFFICIAL_AUTH_BACKUP_PATH):
         raise RuntimeError("没有可恢复的 OpenAI 官方认证，请重新登录官方账号")
-    restore_file_snapshot(DESKTOP_AUTH_PATH, snapshot_file(OFFICIAL_AUTH_BACKUP_PATH))
+    restore_file_snapshot(DESKTOP_AUTH_PATH, snapshot_file(OFFICIAL_AUTH_BACKUP_PATH), mode=0o600)
 
 
 def transaction_paths(include_auth_backups=True):
@@ -687,6 +687,8 @@ def _switch_provider_locked(provider):
 
     targets = config_targets()
     snapshots = {path: snapshot_file(path) for path in transaction_paths()}
+    env_name = "%s_API_KEY" % provider["key"].upper() if provider["key"] != "openai" else ""
+    previous_key = get_user_env_macos(env_name) if env_name else None
     previous_provider = parse_toml(DESKTOP_CONFIG_PATH).get("model_provider", "")
     try:
         if provider["key"] != "openai" and write_recovery_auth_snapshot(previous_provider):
@@ -709,7 +711,6 @@ def _switch_provider_locked(provider):
                 msgs.append("OpenAI 官方认证已恢复")
         else:
             ensure_api_key_login(find_codex_cli(), key, DESKTOP_CODEX_DIR)
-            env_name = "%s_API_KEY" % provider["key"].upper()
             set_user_env_macos(env_name, key)
             os.environ[env_name] = key
             msgs.append("官方桌面端第三方 API Key 登录态已建立")
@@ -720,10 +721,15 @@ def _switch_provider_locked(provider):
         save_providers(providers)
     except Exception as exc:
         rollback_errors = restore_snapshots(snapshots)
+        if env_name:
+            try:
+                restore_keychain_secret(env_name, previous_key)
+            except Exception as rollback_exc:
+                rollback_errors.append("macOS 钥匙串: %s" % rollback_exc)
         error_text = str(exc).replace(key, "***") if key else str(exc)
         if rollback_errors:
             return False, msgs + ["切换失败，且部分回滚未完成：%s；%s" % (error_text, " | ".join(rollback_errors))]
-        return False, msgs + ["切换失败，配置、认证与供应商状态已回滚：%s" % error_text]
+        return False, msgs + ["切换失败，配置、认证、密钥与供应商状态已回滚：%s" % error_text]
 
     msgs.append("未执行 codex logout（保留第三方 API Key 登录态）")
     return True, msgs
@@ -1117,7 +1123,7 @@ class App:
                 provider["active"] = provider["key"] == operation_key
                 provider["api_key"] = ""
             self.log("✔ 中转站切换完成并已打开 Codex，第三方登录态已生效")
-            self.log("新终端需 source ~/.zshrc 或重开终端才能继承环境变量")
+            self.log("API Key 已安全保存在 macOS 钥匙串")
             self.refresh_list()
             self.refresh_status()
         else:
@@ -1132,17 +1138,26 @@ class App:
         if not p["name"] or not p["base_url"]:
             messagebox.showwarning("提示", "名称、API 地址必填")
             return
+        api_key = str(p.get("api_key") or "").strip()
+        env_name = "%s_API_KEY" % validate_provider_key(p["key"]).upper() if api_key else ""
+        previous_key = get_user_env_macos(env_name) if env_name else None
         try:
-            api_key = str(p.get("api_key") or "").strip()
             if api_key:
-                env_name = "%s_API_KEY" % validate_provider_key(p["key"]).upper()
                 set_user_env_macos(env_name, api_key)
-                os.environ[env_name] = api_key
             save_providers(self.providers)
             p["api_key"] = ""
             self.vars["api_key"].set("********" if current_api_key(p) else "")
         except Exception as exc:
-            messagebox.showerror("保存失败", "供应商配置未保存：%s" % exc)
+            if env_name:
+                try:
+                    restore_keychain_secret(env_name, previous_key)
+                except Exception as rollback_exc:
+                    messagebox.showerror(
+                        "保存失败",
+                        "供应商配置未保存，且原 API Key 恢复失败：%s；%s" % (exc, rollback_exc),
+                    )
+                    return
+            messagebox.showerror("保存失败", "供应商配置未保存，API Key 已恢复：%s" % exc)
             return
         self.log("已保存供应商「%s」配置%s" % (p["name"], "及 API Key" if api_key else ""))
         self.refresh_list()
@@ -1329,12 +1344,21 @@ def re_key(name):
 
 
 def main():
+    if "--self-test-keyring-backend" in sys.argv:
+        backend = keyring.get_keyring()
+        print("%s.%s" % (backend.__class__.__module__, backend.__class__.__name__))
+        return
     if "--self-test-package" in sys.argv:
         expected_arch = os.environ.get("SUSU_EXPECT_ARCH", "")
         if expected_arch and platform.machine() != expected_arch:
             raise RuntimeError("构建架构不匹配：期望 %s，实际 %s" % (expected_arch, platform.machine()))
         if APP_VERSION != "1.21-macOS":
             raise RuntimeError("应用版本不是 V1.21 macOS")
+        if sys.platform == "darwin":
+            backend = keyring.get_keyring()
+            backend_name = "%s.%s" % (backend.__class__.__module__, backend.__class__.__name__)
+            if backend_name != "keyring.backends.macOS.Keyring":
+                raise RuntimeError("macOS 钥匙串后端不可用：%s" % backend_name)
         ssl_context = create_ssl_context()
         if ssl_context.verify_mode != ssl.CERT_REQUIRED or not ssl_context.check_hostname:
             raise RuntimeError("包内 TLS 证书验证未启用")
