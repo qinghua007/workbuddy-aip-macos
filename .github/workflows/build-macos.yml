@@ -21,7 +21,7 @@ jobs:
             release_dir: release-apple-silicon
             codex_npm_platform: darwin-arm64
             codex_triple: aarch64-apple-darwin
-            zip_name: 苏苏Codex全能中转站一键切换-macOS-Apple-Silicon-arm64-V1.24.zip
+            zip_name: 鑻忚嫃Codex鍏ㄨ兘涓浆绔欎竴閿垏鎹?macOS-Apple-Silicon-arm64-V1.24.zip
           - runner: macos-15-intel
             arch: x86_64
             app_name: CodexSwitcher-Intel
@@ -29,7 +29,7 @@ jobs:
             release_dir: release-intel
             codex_npm_platform: darwin-x64
             codex_triple: x86_64-apple-darwin
-            zip_name: 苏苏Codex全能中转站一键切换-macOS-Intel-x86_64-V1.24.zip
+            zip_name: 鑻忚嫃Codex鍏ㄨ兘涓浆绔欎竴閿垏鎹?macOS-Intel-x86_64-V1.24.zip
     runs-on: ${{ matrix.runner }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
@@ -50,7 +50,7 @@ jobs:
         run: python -m pip install --upgrade pip pyinstaller pillow certifi keyring
       - name: Generate icon
         run: |
-          python generate_icon.py
+          python generate_icon_macos.py
           iconutil -c icns icon.iconset -o susu_icon.icns
       - name: Acquire official native Codex CLI
         run: |
@@ -96,7 +96,7 @@ jobs:
           /usr/libexec/PlistBuddy -c "Delete :CFBundleDisplayName" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Delete :LSMultipleInstancesProhibited" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $BUNDLE_ID" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string 苏苏Codex全能中转站一键切换" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string 鑻忚嫃Codex鍏ㄨ兘涓浆绔欎竴閿垏鎹? "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.24" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.24.0" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :LSMultipleInstancesProhibited bool true" "$PLIST"
@@ -106,8 +106,7 @@ jobs:
           test "$(lipo -archs "$BIN")" = "$EXPECT_ARCH"
           SUSU_EXPECT_ARCH="$EXPECT_ARCH" "$BIN" --self-test-package
           test -s "$(python -c 'import certifi; print(certifi.where())')"
-          # --self-test-package 在当前原生进程中强制校验 macOS Keychain 后端。
-          PLIST_PATH="$PLIST" python - <<'PY'
+          # --self-test-package 鍦ㄥ綋鍓嶅師鐢熻繘绋嬩腑寮哄埗鏍￠獙 macOS Keychain 鍚庣銆?          PLIST_PATH="$PLIST" python - <<'PY'
           import os, plistlib
           with open(os.environ["PLIST_PATH"], "rb") as handle:
               info = plistlib.load(handle)
@@ -118,17 +117,17 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$APP"
           mkdir -p "$RELEASE_DIR"
           ditto "$APP" "$RELEASE_DIR/$APP_NAME.app"
-          cat > "$RELEASE_DIR/首次启动修复.command" <<EOF
+          cat > "$RELEASE_DIR/棣栨鍚姩淇.command" <<EOF
           #!/bin/bash
           set -euo pipefail
           SCRIPT_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
           APP="\$SCRIPT_DIR/$APP_NAME.app"
           if [[ "\$(uname -m)" != "$EXPECT_ARCH" ]]; then
-            osascript -e 'display alert "架构不匹配" message "此安装包仅适用于 $EXPECT_ARCH Mac。"' || true
+            osascript -e 'display alert "鏋舵瀯涓嶅尮閰? message "姝ゅ畨瑁呭寘浠呴€傜敤浜?$EXPECT_ARCH Mac銆?' || true
             exit 1
           fi
           if [[ ! -d "\$APP" ]]; then
-            osascript -e 'display alert "未找到应用" message "请把首次启动修复.command 与 $APP_NAME.app 放在同一文件夹。"' || true
+            osascript -e 'display alert "鏈壘鍒板簲鐢? message "璇锋妸棣栨鍚姩淇.command 涓?$APP_NAME.app 鏀惧湪鍚屼竴鏂囦欢澶广€?' || true
             exit 1
           fi
           xattr -dr com.apple.quarantine "\$APP" 2>/dev/null || true
@@ -138,14 +137,11 @@ jobs:
           codesign --verify --deep --strict "\$APP"
           open "\$APP"
           EOF
-          chmod 755 "$RELEASE_DIR/首次启动修复.command"
-          cat > "$RELEASE_DIR/使用说明.txt" <<EOF
-          苏苏Codex全能中转站一键切换 macOS V1.24
-          架构：$EXPECT_ARCH
-          修复：兼容旧签名钥匙串条目的 -25244 ACL 冲突；切换前退出旧 Codex GUI、切换后验证全新 GUI 进程、单实例单图标、内置官方原生 Codex CLI。
-          首次打开如被 Gatekeeper 拦截，请右键“首次启动修复.command”选择打开。
-          请先将 Codex 官方 App 复制到 /Applications，并至少打开一次。
-          EOF
+          chmod 755 "$RELEASE_DIR/棣栨鍚姩淇.command"
+          cat > "$RELEASE_DIR/浣跨敤璇存槑.txt" <<EOF
+          鑻忚嫃Codex鍏ㄨ兘涓浆绔欎竴閿垏鎹?macOS V1.24
+          鏋舵瀯锛?EXPECT_ARCH
+          淇锛氬吋瀹规棫绛惧悕閽ュ寵涓叉潯鐩殑 -25244 ACL 鍐茬獊锛涘垏鎹㈠墠閫€鍑烘棫 Codex GUI銆佸垏鎹㈠悗楠岃瘉鍏ㄦ柊 GUI 杩涚▼銆佸崟瀹炰緥鍗曞浘鏍囥€佸唴缃畼鏂瑰師鐢?Codex CLI銆?          棣栨鎵撳紑濡傝 Gatekeeper 鎷︽埅锛岃鍙抽敭鈥滈娆″惎鍔ㄤ慨澶?command鈥濋€夋嫨鎵撳紑銆?          璇峰厛灏?Codex 瀹樻柟 App 澶嶅埗鍒?/Applications锛屽苟鑷冲皯鎵撳紑涓€娆°€?          EOF
           ditto -c -k --sequesterRsrc --keepParent "$RELEASE_DIR" "$RELEASE_ZIP"
           rm -rf archive-check
           mkdir archive-check
@@ -186,5 +182,5 @@ jobs:
           TAG="macos-v1.24-${GITHUB_RUN_ID}"
           gh release create "$TAG" release-assets/*.zip \
             --target "$GITHUB_SHA" \
-            --title "苏苏 Codex macOS V1.24 GUI 认证刷新修复版" \
-            --notes "Apple Silicon arm64 与 Intel x86_64 原生修复包。修复旧 ad-hoc 签名钥匙串条目导致的 errSecInvalidOwnerEdit(-25244)，同值不重复写、冲突原地更新、回滚先比对；第三方和 GPT 登录均直接启动官方 Codex.app 主程序，显式传递干净环境并禁用已知 GPU 合成白屏路径；并验证 GUI 新 PID、架构、包内自检、Keychain 后端、Info.plist 和代码签名。"
+            --title "鑻忚嫃 Codex macOS V1.24 GUI 璁よ瘉鍒锋柊淇鐗? \
+            --notes "Apple Silicon arm64 涓?Intel x86_64 鍘熺敓淇鍖呫€備慨澶嶆棫 ad-hoc 绛惧悕閽ュ寵涓叉潯鐩鑷寸殑 errSecInvalidOwnerEdit(-25244)锛屽悓鍊间笉閲嶅鍐欍€佸啿绐佸師鍦版洿鏂般€佸洖婊氬厛姣斿锛涚涓夋柟鍜?GPT 鐧诲綍鍧囩洿鎺ュ惎鍔ㄥ畼鏂?Codex.app 涓荤▼搴忥紝鏄惧紡浼犻€掑共鍑€鐜骞剁鐢ㄥ凡鐭?GPU 鍚堟垚鐧藉睆璺緞锛涘苟楠岃瘉 GUI 鏂?PID銆佹灦鏋勩€佸寘鍐呰嚜妫€銆並eychain 鍚庣銆両nfo.plist 鍜屼唬鐮佺鍚嶃€?
