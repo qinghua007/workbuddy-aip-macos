@@ -95,13 +95,33 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$APP"
           mkdir -p "$RELEASE_DIR"
           ditto "$APP" "$RELEASE_DIR/$APP_NAME.app"
-          cp "Intel芯片版-首次启动修复.command" "$RELEASE_DIR/首次启动修复.command"
+          cat > "$RELEASE_DIR/首次启动修复.command" <<EOF
+          #!/bin/bash
+          set -euo pipefail
+          SCRIPT_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+          APP="\$SCRIPT_DIR/$APP_NAME.app"
+          if [[ "\$(uname -m)" != "$EXPECT_ARCH" ]]; then
+            osascript -e 'display alert "架构不匹配" message "此安装包仅适用于 $EXPECT_ARCH Mac。"' || true
+            exit 1
+          fi
+          if [[ ! -d "\$APP" ]]; then
+            osascript -e 'display alert "未找到应用" message "请把首次启动修复.command 与 $APP_NAME.app 放在同一文件夹。"' || true
+            exit 1
+          fi
+          xattr -dr com.apple.quarantine "\$APP" 2>/dev/null || true
+          xattr -cr "\$APP" 2>/dev/null || true
+          chmod 755 "\$APP/Contents/MacOS/$APP_NAME"
+          codesign --force --deep --sign - "\$APP"
+          codesign --verify --deep --strict "\$APP"
+          open "\$APP"
+          EOF
           chmod 755 "$RELEASE_DIR/首次启动修复.command"
           cat > "$RELEASE_DIR/使用说明.txt" <<EOF
           苏苏Codex全能中转站一键切换 macOS V1.21
           架构：$EXPECT_ARCH
-          更新：读取模型、使用该中转站、切换 GPT 账号登录。
+          修复：单实例单图标、Codex.app 内置 CLI 自动识别、API Key 保存到 macOS 钥匙串。
           首次打开如被 Gatekeeper 拦截，请右键“首次启动修复.command”选择打开。
+          请先将 Codex 官方 App 复制到 /Applications，并至少打开一次。
           EOF
           ditto -c -k --sequesterRsrc --keepParent "$RELEASE_DIR" "$RELEASE_ZIP"
           rm -rf archive-check
