@@ -363,36 +363,6 @@ def restore_keychain_secret(name, value):
         os.environ.pop(name, None)
 
 
-def _set_shell_profile_secret(name, value):
-    """旧版兼容：安全、原子地写 shell profile，供终端直接使用。"""
-    name = validate_env_name(name)
-    if not value:
-        return
-    profile = get_shell_profile()
-    marker_begin = "# >>> Codex Provider Switcher: %s >>>" % name
-    marker_end = "# <<< Codex Provider Switcher: %s <<<" % name
-    content = ""
-    if os.path.exists(profile):
-        with open(profile, "r", encoding="utf-8", errors="strict") as f:
-            content = f.read()
-
-    new_lines = []
-    skipping = False
-    for line in content.splitlines():
-        if line == marker_begin:
-            skipping = True
-            continue
-        if line == marker_end:
-            skipping = False
-            continue
-        if not skipping:
-            new_lines.append(line)
-    if skipping:
-        raise RuntimeError("shell profile 中的密钥配置标记不完整")
-    new_lines.extend(["", marker_begin, "export %s=%s" % (name, shlex.quote(value)), marker_end])
-    atomic_write_text(profile, "\n".join(new_lines) + "\n", mode=0o600)
-
-
 def _get_shell_profile_secret(name):
     name = validate_env_name(name)
     profile = get_shell_profile()
