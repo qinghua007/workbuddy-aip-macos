@@ -653,11 +653,24 @@ def transaction_paths(include_auth_backups=True):
     return list(dict.fromkeys(paths))
 
 
+def sensitive_file_mode(path):
+    sensitive_paths = {
+        os.path.normcase(os.path.abspath(DESKTOP_AUTH_PATH)),
+        os.path.normcase(os.path.abspath(OFFICIAL_AUTH_BACKUP_PATH)),
+        os.path.normcase(os.path.abspath(OFFICIAL_AUTH_BACKUP_META_PATH)),
+        os.path.normcase(os.path.abspath(RECOVERY_AUTH_BACKUP_PATH)),
+        os.path.normcase(os.path.abspath(RECOVERY_AUTH_BACKUP_META_PATH)),
+    }
+    return 0o600 if os.path.normcase(os.path.abspath(path)) in sensitive_paths else None
+
+
 def restore_snapshots(snapshots):
     errors = []
     for path, content in snapshots.items():
         try:
-            restore_file_snapshot(path, content)
+            restore_file_snapshot(path, content, mode=sensitive_file_mode(path))
+            if content is not None and snapshot_file(path) != content:
+                raise RuntimeError("恢复后内容校验不一致")
         except Exception as exc:
             errors.append("%s: %s" % (path, exc))
     return errors
@@ -1344,10 +1357,6 @@ def re_key(name):
 
 
 def main():
-    if "--self-test-keyring-backend" in sys.argv:
-        backend = keyring.get_keyring()
-        print("%s.%s" % (backend.__class__.__module__, backend.__class__.__name__))
-        return
     if "--self-test-package" in sys.argv:
         expected_arch = os.environ.get("SUSU_EXPECT_ARCH", "")
         if expected_arch and platform.machine() != expected_arch:

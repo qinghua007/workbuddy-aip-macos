@@ -83,8 +83,7 @@ jobs:
           test "$(lipo -archs "$BIN")" = "$EXPECT_ARCH"
           SUSU_EXPECT_ARCH="$EXPECT_ARCH" "$BIN" --self-test-package
           test -s "$(python -c 'import certifi; print(certifi.where())')"
-          KEYRING_BACKEND="$($BIN --self-test-keyring-backend)"
-          test "$KEYRING_BACKEND" = "keyring.backends.macOS.Keyring"
+          # --self-test-package 在当前原生进程中强制校验 macOS Keychain 后端。
           PLIST_PATH="$PLIST" python - <<'PY'
           import os, plistlib
           with open(os.environ["PLIST_PATH"], "rb") as handle:
