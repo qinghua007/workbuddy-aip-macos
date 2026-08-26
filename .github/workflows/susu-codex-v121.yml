@@ -1,9 +1,9 @@
-name: Build SuSu Switcher macOS V1.21
+name: Build SuSu Switcher macOS V1.22
 
 on:
   workflow_dispatch:
   push:
-    branches: [main, master, susu-codex-v1.21-build]
+    branches: [main, master, susu-codex-v1.22-build]
 
 permissions:
   contents: read
@@ -17,19 +17,19 @@ jobs:
           - runner: macos-15
             arch: arm64
             app_name: CodexSwitcher-AppleSilicon
-            artifact_name: SuSu-Switcher-AppleSilicon-V1.21
+            artifact_name: SuSu-Switcher-AppleSilicon-V1.22
             release_dir: release-apple-silicon
             codex_npm_platform: darwin-arm64
             codex_triple: aarch64-apple-darwin
-            zip_name: 苏苏Codex全能中转站一键切换-macOS-Apple-Silicon-arm64-V1.21.zip
+            zip_name: 苏苏Codex全能中转站一键切换-macOS-Apple-Silicon-arm64-V1.22.zip
           - runner: macos-15-intel
             arch: x86_64
             app_name: CodexSwitcher-Intel
-            artifact_name: SuSu-Switcher-Intel-V1.21
+            artifact_name: SuSu-Switcher-Intel-V1.22
             release_dir: release-intel
             codex_npm_platform: darwin-x64
             codex_triple: x86_64-apple-darwin
-            zip_name: 苏苏Codex全能中转站一键切换-macOS-Intel-x86_64-V1.21.zip
+            zip_name: 苏苏Codex全能中转站一键切换-macOS-Intel-x86_64-V1.22.zip
     runs-on: ${{ matrix.runner }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
@@ -97,8 +97,8 @@ jobs:
           /usr/libexec/PlistBuddy -c "Delete :LSMultipleInstancesProhibited" "$PLIST" 2>/dev/null || true
           /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $BUNDLE_ID" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string 苏苏Codex全能中转站一键切换" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.21" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.21.2" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.22" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.22.0" "$PLIST"
           /usr/libexec/PlistBuddy -c "Add :LSMultipleInstancesProhibited bool true" "$PLIST"
           plutil -lint "$PLIST"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSMultipleInstancesProhibited' "$PLIST")" = "true"
@@ -113,7 +113,7 @@ jobs:
               info = plistlib.load(handle)
           assert info["CFBundleIdentifier"] == "com.susu.codex-switcher"
           assert info["LSMultipleInstancesProhibited"] is True
-          assert info["CFBundleVersion"] == "1.21.2"
+          assert info["CFBundleVersion"] == "1.22.0"
           PY
           codesign --verify --deep --strict --verbose=2 "$APP"
           mkdir -p "$RELEASE_DIR"
@@ -140,9 +140,9 @@ jobs:
           EOF
           chmod 755 "$RELEASE_DIR/首次启动修复.command"
           cat > "$RELEASE_DIR/使用说明.txt" <<EOF
-          苏苏Codex全能中转站一键切换 macOS V1.21
+          苏苏Codex全能中转站一键切换 macOS V1.22
           架构：$EXPECT_ARCH
-          修复：单实例单图标、内置官方原生 Codex CLI、动态识别系统 CLI、API Key 保存到 macOS 钥匙串。
+          修复：切换前退出旧 Codex GUI、切换后验证全新 GUI 进程、单实例单图标、内置官方原生 Codex CLI、API Key 保存到 macOS 钥匙串。
           首次打开如被 Gatekeeper 拦截，请右键“首次启动修复.command”选择打开。
           请先将 Codex 官方 App 复制到 /Applications，并至少打开一次。
           EOF
@@ -173,7 +173,7 @@ jobs:
       - name: Download verified ZIP files
         uses: actions/download-artifact@v4
         with:
-          pattern: SuSu-Switcher-*-V1.21
+          pattern: SuSu-Switcher-*-V1.22
           path: release-assets
           merge-multiple: true
       - name: Publish temporary GitHub release
@@ -183,8 +183,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(find release-assets -maxdepth 1 -type f -name '*.zip' | wc -l | tr -d ' ')" = "2"
-          TAG="macos-v1.21-${GITHUB_RUN_ID}"
+          TAG="macos-v1.22-${GITHUB_RUN_ID}"
           gh release create "$TAG" release-assets/*.zip \
             --target "$GITHUB_SHA" \
-            --title "苏苏 Codex macOS V1.21 修复版" \
-            --notes "Apple Silicon arm64 与 Intel x86_64 原生修复包。已在对应 macOS runner 验证架构、包内自检、Keychain 后端、Info.plist 和代码签名。"
+            --title "苏苏 Codex macOS V1.22 GUI 认证刷新修复版" \
+            --notes "Apple Silicon arm64 与 Intel x86_64 原生修复包。切换中转站或 GPT 账号前退出旧 Codex GUI，切换后只在检测到全新 GUI PID 时报告成功；并已验证架构、包内自检、Keychain 后端、Info.plist 和代码签名。"
