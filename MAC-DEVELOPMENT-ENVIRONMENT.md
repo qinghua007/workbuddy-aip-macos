@@ -55,7 +55,7 @@ Mac 原生 Python/Tkinter
 ## 未安装或当前不需要
 
 - Homebrew：当前未安装。已尝试官方安装脚本；普通会话无 `sudo` 权限，提升权限重试又遭遇网络空响应，因此需要管理员终端和稳定网络人工完成。Intel Mac 官方前缀应为 `/usr/local`。
-- GitHub CLI：未安装；通过 Homebrew 安装受上述阻塞影响。安装后仍需人工执行 `gh auth login`，不要在对话中提供密码、Token 或验证码。
+- GitHub CLI：已安装，`gh 2.98.0`，路径 `/Users/mac/.local/bin/gh`；当前未登录 GitHub。需要人工执行 `gh auth login` 完成第三方授权，不要在对话中提供密码、Token 或验证码。
 - Git LFS：未安装；仓库当前无 LFS 文件。
 - SVN：未安装；SVN 不是当前 GitHub 主开发链。
 - Docker / Docker Compose：未安装；仓库没有 Dockerfile 或 Compose 配置，也无本地基础服务。
