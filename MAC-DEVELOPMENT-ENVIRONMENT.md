@@ -129,6 +129,26 @@ Mac Worktree
 - 正式服链路：`PARTIAL`。本轮未连接或修改正式服；必须使用测试服已验收的同一 Git Commit/Release。
 - 当前 GitHub CLI 未登录；`gh 2.98.0` 已安装。业务仓库和治理仓库的远端访问均曾出现 HTTPS 代理 `502`/Empty reply，浏览器访问 GitHub 报 `ERR_TUNNEL_CONNECTION_FAILED`，治理仓库 SSH 也曾出现 `publickey` 拒绝。系统 HTTP/HTTPS/SOCKS 代理均指向 `127.0.0.1:7890`，端口在监听但 GitHub 隧道无响应。当前没有执行 Push、PR 或远端写入。
 
+## ECS 只读盘点（2026-08-31）
+
+已通过一次性 SSH 密码提示完成两台 ECS 的只读检查；密码未写入文件、命令参数、日志或提交。服务器未执行安装、重启、发布、删除、源码修改或数据库写操作。
+
+| 环境 | 公网 IP | 系统 | 关键运行状态 | 公开监听端口 |
+| --- | --- | --- | --- | --- |
+| 开发版服 | `47.104.68.59` | CentOS 8 | `mysqld.service` 运行；`php-fpm-72.service`、`redis.service` 失败 | `21`、`22`、`80`、`443`、`888`、`8888`、`1818`、`3306` |
+| 正式服 | `118.190.106.133` | CentOS 7 | Docker、Nginx、Hermes API/CRUD、new-token-api、`susu-codex-task-staging` 均运行 | `22`、`80`、`443`、`888`、`8888`、`1818`、`1238`、`7272` |
+
+正式服发现 3 个已不存在的 Hermes staging systemd 单元残留，以及 cloud-init 失败单元；这些仅记录，未清理。正式服 `/opt/hermes/current` 当前指向 `/opt/hermes-prod/releases/SUSU-COMMON-20260806-025-r123`。开发服存在 `/opt/hermes`，本次未发现可确认的发布指针。检查未读取 `.env`、密钥、业务配置内容或数据库数据。
+
+本机已配置不含凭据的 SSH 别名：
+
+```text
+ssh susu-dev-ecs
+ssh susu-prod-ecs
+```
+
+配置文件：`~/.ssh/config`。后续使用别名连接时仍需在终端输入密码，或改用已授权的 SSH 公钥。
+
 ## Mac 兼容问题
 
 已经修复：
