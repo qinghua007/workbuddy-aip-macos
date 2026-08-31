@@ -14,9 +14,27 @@
 
 ## 本地开发
 
-```text
-python workbuddy_aip.pyw
+在 macOS Intel 上，从仓库根目录执行：
+
+```sh
+./scripts/setup-macos.sh
+./scripts/test-local.sh
+./scripts/dev-local.sh
 ```
+
+停止本地 GUI：
+
+```sh
+./scripts/stop-local.sh
+```
+
+完整的 Intel 本机构建、签名和架构检查：
+
+```sh
+./scripts/build-local.sh
+```
+
+详细前置条件、目录约定、健康检查和故障排查见 [`docs/LOCAL_DEV_MACOS.md`](docs/LOCAL_DEV_MACOS.md)。
 
 Windows 构建：
 
