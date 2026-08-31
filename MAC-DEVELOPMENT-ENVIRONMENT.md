@@ -127,7 +127,7 @@ Mac Worktree
 
 - 测试服链路：`PARTIAL`。需要 GitHub 认证、PR 合并权限和现有部署方式确认。
 - 正式服链路：`PARTIAL`。本轮未连接或修改正式服；必须使用测试服已验收的同一 Git Commit/Release。
-- 当前 GitHub CLI 未登录，治理仓库访问曾出现 HTTPS 代理 502 和 SSH publickey 拒绝。
+- 当前 GitHub CLI 未登录；业务仓库和治理仓库的远端访问均曾出现 HTTPS 代理 `502`，治理仓库 SSH 也曾出现 `publickey` 拒绝。当前没有执行 Push、PR 或远端写入。
 
 ## Mac 兼容问题
 
