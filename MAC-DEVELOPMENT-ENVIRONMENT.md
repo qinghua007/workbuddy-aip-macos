@@ -127,7 +127,7 @@ Mac Worktree
 
 - 测试服链路：`PARTIAL`。需要 GitHub 认证、PR 合并权限和现有部署方式确认。
 - 正式服链路：`PARTIAL`。本轮未连接或修改正式服；必须使用测试服已验收的同一 Git Commit/Release。
-- 当前 GitHub CLI 未登录；业务仓库和治理仓库的远端访问均曾出现 HTTPS 代理 `502`，治理仓库 SSH 也曾出现 `publickey` 拒绝。当前没有执行 Push、PR 或远端写入。
+- 当前 GitHub CLI 未登录；`gh 2.98.0` 已安装。业务仓库和治理仓库的远端访问均曾出现 HTTPS 代理 `502`/Empty reply，浏览器访问 GitHub 报 `ERR_TUNNEL_CONNECTION_FAILED`，治理仓库 SSH 也曾出现 `publickey` 拒绝。系统 HTTP/HTTPS/SOCKS 代理均指向 `127.0.0.1:7890`，端口在监听但 GitHub 隧道无响应。当前没有执行 Push、PR 或远端写入。
 
 ## Mac 兼容问题
 
