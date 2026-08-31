@@ -6,7 +6,7 @@
 
 `PARTIAL`
 
-项目本地环境已完成部署、测试、构建和启动冒烟；GitHub CLI 登录、GitHub Push/PR、测试服和正式服链路仍需外部认证与部署权限，因此不能宣称端到端发布链已完成。
+项目本地环境已完成部署、测试、构建和启动冒烟；GitHub CLI 已登录，部署分支已发布并创建 PR，但测试服和正式服链路尚未执行，因此不能宣称端到端发布链已完成。
 
 ## 推荐结论
 
@@ -73,7 +73,7 @@ Mac 原生 Python/Tkinter
 - Worktree 根目录：`/Users/mac/Projects/susu-worktrees`
 - 当前部署 Worktree：`/Users/mac/Projects/susu-worktrees/macos-dev-environment-TASK-20260831-172058`
 - 当前部署分支：`chore/macos-dev-environment-TASK-20260831-172058`
-- 部署分支提交：`37cbe15`
+- 部署分支最新本地提交：`0840f84`；远端 PR 分支最新提交：`faf672c`
 
 ## 本地环境
 
@@ -121,13 +121,13 @@ Mac Worktree
 → 正式服
 ```
 
-当前部署分支只在本地提交，尚未 Push 或创建 PR。不得直接修改 `main`、测试服或正式服。
+当前部署分支已通过 GitHub 官方 Git 数据 API 发布并创建 PR。不得直接修改 `main`、测试服或正式服。
 
 ## 测试服与正式服
 
-- 测试服链路：`PARTIAL`。需要 GitHub 认证、PR 合并权限和现有部署方式确认。
-- 正式服链路：`PARTIAL`。本轮未连接或修改正式服；必须使用测试服已验收的同一 Git Commit/Release。
-- 当前 GitHub CLI 未登录；`gh 2.98.0` 已安装。业务仓库和治理仓库的远端访问均曾出现 HTTPS 代理 `502`/Empty reply，浏览器访问 GitHub 报 `ERR_TUNNEL_CONNECTION_FAILED`，治理仓库 SSH 也曾出现 `publickey` 拒绝。系统 HTTP/HTTPS/SOCKS 代理均指向 `127.0.0.1:7890`，端口在监听但 GitHub 隧道无响应。当前没有执行 Push、PR 或远端写入。
+- 测试服链路：`PARTIAL`。GitHub 分支与 PR 已就绪；尚未合并 PR 或执行测试服部署。
+- 正式服链路：`PARTIAL`。本轮未连接或修改正式服；必须在测试服验收同一 Git Commit/Release 后再发布。
+- GitHub CLI `gh 2.98.0` 已登录 `qinghua007`，认证由系统钥匙串管理，GitHub Token scope 包含 `repo`。已通过 GitHub API 发布部署分支并创建 PR：<https://github.com/qinghua007/workbuddy-aip-macos/pull/2>。PR 当前为 `OPEN`，base 为 `main`，merge state 为 `CLEAN`，暂无失败检查项。Git 的 HTTPS Push 仍受本机代理隧道 `502` 影响，因此本次分支发布使用已登录 CLI 的官方 Git 数据 API 完成；未修改 `main`。
 
 ## ECS 只读盘点（2026-08-31）
 
