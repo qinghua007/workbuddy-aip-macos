@@ -3,3 +3,8 @@ build*/
 dist*/
 *.icns
 *.zip
+.venv/
+.env
+*.spec
+icon.iconset/
+.DS_Store
