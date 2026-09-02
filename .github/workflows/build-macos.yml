@@ -3,6 +3,8 @@ name: Build WorkBuddy AIP for macOS
 on:
   push:
     branches: [main, master]
+  pull_request:
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
@@ -97,6 +99,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Publish Intel release
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: workbuddy-aip-intel-v1.4-ssl-fixed
